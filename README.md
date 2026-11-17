@@ -424,8 +424,10 @@ python bili_live.py sync-danmakus
 
 ## 14. 致谢与声明
 
-本项目的公开历史数据来源为 [danmakus](https://danmakus.com/)。
+特别感谢 [danmakus](https://danmakus.com/) 提供公开历史数据接口，使本项目能够补充本地
+采集之外的缺失记录，并进行历史数据交叉核对。
 
-项目中的去重、匹配、增量同步、报告统计和可视化逻辑均为独立实现。
+本项目仅将 danmakus 的公开历史数据作为数据来源。去重、匹配、增量同步、报告统计和
+可视化逻辑均由 DD轨迹独立实现。
 
 DD轨迹是独立的本地工具，不是 B 站官方产品，也不代表 danmakus 官方。
