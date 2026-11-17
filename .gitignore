@@ -1,0 +1,56 @@
+# Login credentials and local identity
+cookie.txt
+qr.png
+qr_key.txt
+account_identity.json
+account_avatar_*.png
+settings.json
+
+# Runtime state and logs
+collector.alive
+collector.pid
+collector.args.json
+collector.disabled
+watchdog.alive
+watchdog.pid
+console.ready
+*.log
+
+# Personal and historical data
+data.json
+live_account.json
+rooms.json
+danmakus_history.json
+gift_sample.json
+*.jsonl
+*.jsonl.bak*
+danmaku_sync_quota.json
+danmakus_v3_*.json
+
+# Generated reports
+report.html
+live_report*.html
+
+# Screenshots, recordings, demo assets and temporary work
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.mp4
+*.wav
+*.srt
+!assets/app-icon.png
+demo_video/
+_api/
+_rec2026/
+auto_clicker/
+
+# Build products and caches
+build/
+dist/
+*.exe
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
+

@@ -1,0 +1,153 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"
+     viewBox="0 0 1024 1024" role="img"
+     aria-label="Black dragon guard with live self-check eye">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#121a29"/>
+      <stop offset="0.52" stop-color="#0d1420"/>
+      <stop offset="1" stop-color="#19162a"/>
+    </linearGradient>
+    <linearGradient id="pink" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff9cbd"/>
+      <stop offset="0.48" stop-color="#fb7299"/>
+      <stop offset="1" stop-color="#ff4f86"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9cf4ff"/>
+      <stop offset="0.42" stop-color="#53ddff"/>
+      <stop offset="1" stop-color="#00aeec"/>
+    </linearGradient>
+    <linearGradient id="dragon" x1="0.15" y1="0.05" x2="0.9" y2="0.95">
+      <stop offset="0" stop-color="#202a3a"/>
+      <stop offset="0.42" stop-color="#101722"/>
+      <stop offset="1" stop-color="#060a10"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fb7299" stop-opacity=".68"/>
+      <stop offset=".5" stop-color="#62dfff" stop-opacity=".25"/>
+      <stop offset="1" stop-color="#fb7299" stop-opacity=".5"/>
+    </linearGradient>
+    <radialGradient id="aura" cx="50%" cy="48%" r="58%">
+      <stop offset="0" stop-color="#1b5877" stop-opacity=".55"/>
+      <stop offset=".52" stop-color="#16304c" stop-opacity=".24"/>
+      <stop offset="1" stop-color="#0d1420" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="eyeGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#dffbff"/>
+      <stop offset=".38" stop-color="#65e6ff"/>
+      <stop offset="1" stop-color="#00aeec"/>
+    </radialGradient>
+    <filter id="pinkGlow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="18" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="cyanGlow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="12" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <clipPath id="rounded">
+      <rect x="28" y="28" width="968" height="968" rx="228"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#rounded)">
+    <rect x="28" y="28" width="968" height="968" rx="228" fill="url(#bg)"/>
+    <rect x="28" y="28" width="968" height="968" fill="url(#aura)"/>
+
+    <!-- Restrained live-scan rings. -->
+    <circle cx="514" cy="512" r="356" fill="none"
+            stroke="#b5eaff" stroke-opacity=".08" stroke-width="18"/>
+    <circle cx="514" cy="512" r="310" fill="none"
+            stroke="#9edff4" stroke-opacity=".11" stroke-width="5"
+            stroke-dasharray="10 24"/>
+    <path d="M232 620A322 322 0 0 1 360 275"
+          fill="none" stroke="url(#pink)" stroke-width="34"
+          stroke-linecap="round" filter="url(#pinkGlow)"/>
+    <path d="M730 741A316 316 0 0 0 850 475"
+          fill="none" stroke="url(#cyan)" stroke-width="24"
+          stroke-linecap="round" opacity=".78" filter="url(#cyanGlow)"/>
+
+    <!-- Broadcast pulse. -->
+    <g fill="none" stroke="#8feaff" stroke-linecap="round">
+      <path d="M742 209c48 18 87 52 112 96" stroke-width="20" opacity=".9"/>
+      <path d="M771 169c67 27 121 77 157 140" stroke-width="14" opacity=".56"/>
+      <path d="M799 131c87 38 156 106 200 190" stroke-width="9" opacity=".3"/>
+    </g>
+    <circle cx="736" cy="232" r="17" fill="#fb7299" filter="url(#pinkGlow)"/>
+
+    <!-- Geometric black dragon, guarding the self-check eye. -->
+    <g>
+      <path d="M250 724
+               C220 646 248 553 322 501
+               L293 406
+               L397 446
+               C430 377 502 335 585 340
+               C685 346 763 414 792 510
+               L871 557
+               L800 598
+               C771 673 705 725 622 740
+               L596 823
+               L518 752
+               C424 762 328 756 250 724Z"
+            fill="url(#dragon)" stroke="#34445c" stroke-width="16"
+            stroke-linejoin="round"/>
+
+      <path d="M322 501
+               C273 435 275 332 346 254
+               C343 335 371 416 427 475Z"
+            fill="#111925" stroke="#2f4057" stroke-width="14"
+            stroke-linejoin="round"/>
+      <path d="M584 342
+               C612 253 690 207 787 235
+               C714 275 673 339 660 415Z"
+            fill="#111925" stroke="#2f4057" stroke-width="14"
+            stroke-linejoin="round"/>
+
+      <!-- Jaw and cheek planes. -->
+      <path d="M642 624C714 612 775 625 833 663
+               C771 691 714 695 662 675
+               C615 657 585 642 551 620Z"
+            fill="#080d14" stroke="#27374d" stroke-width="10"
+            stroke-linejoin="round"/>
+      <path d="M363 635C400 681 448 710 510 723"
+            fill="none" stroke="#41516a" stroke-width="11"
+            stroke-linecap="round" opacity=".52"/>
+      <path d="M479 423C523 453 552 489 570 535"
+            fill="none" stroke="#4b5d78" stroke-width="9"
+            stroke-linecap="round" opacity=".35"/>
+      <path d="M603 388C648 405 683 435 708 475"
+            fill="none" stroke="#4b5d78" stroke-width="9"
+            stroke-linecap="round" opacity=".32"/>
+
+      <!-- Self-check eye. -->
+      <path d="M388 526
+               C450 438 603 420 696 515
+               C627 607 468 625 388 526Z"
+            fill="#f2fdff" stroke="#a9f2ff" stroke-width="12"
+            stroke-linejoin="round"/>
+      <ellipse cx="560" cy="524" rx="86" ry="88" fill="url(#eyeGlow)"
+               filter="url(#cyanGlow)"/>
+      <ellipse cx="560" cy="524" rx="27" ry="74" fill="#07111a"/>
+      <ellipse cx="542" cy="496" rx="14" ry="20" fill="#ffffff" opacity=".75"/>
+      <path d="M425 520C482 476 562 458 648 476"
+            fill="none" stroke="#7ceaff" stroke-width="9"
+            stroke-linecap="round" opacity=".45"/>
+
+      <!-- Pink live spark held in the jaw. -->
+      <path d="M744 615L794 588L788 650Z" fill="url(#pink)"
+            filter="url(#pinkGlow)"/>
+      <circle cx="811" cy="626" r="13" fill="#ff7da8"/>
+    </g>
+  </g>
+
+  <rect x="29" y="29" width="966" height="966" rx="227"
+        fill="none" stroke="url(#edge)" stroke-width="8"/>
+  <rect x="49" y="49" width="926" height="926" rx="208"
+        fill="none" stroke="#ffffff" stroke-opacity=".04" stroke-width="3"/>
+</svg>
