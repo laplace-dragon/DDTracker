@@ -3,7 +3,7 @@
   "interval": 60,
   "cap": 25,
   "rotate_mb": 64,
-  "keep": 2,
+  "keep": 0,
   "close_behavior": "tray",
   "minimize_behavior": "taskbar",
   "data_dir": "data"

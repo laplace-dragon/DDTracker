@@ -19,6 +19,7 @@ import zlib
 from urllib.parse import parse_qs, urlparse
 
 import qrcode
+import local_security
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -93,6 +94,7 @@ def cmd_qr():
     info = data["data"]
     with open(KEY_FILE, "w", encoding="utf-8") as fh:
         fh.write(info["qrcode_key"])
+    local_security.restrict_private_file(KEY_FILE)
     qr = qrcode.QRCode(border=4, error_correction=qrcode.constants.ERROR_CORRECT_M)
     qr.add_data(info["url"])
     qr.make(fit=True)
@@ -136,8 +138,12 @@ def cmd_poll(timeout=180):
             if "SESSDATA=" not in cookie:
                 print("登录成功但未取到 SESSDATA，请重试。")
                 return 1
-            with open(COOKIE_FILE, "w", encoding="utf-8") as fh:
-                fh.write(cookie)
+            local_security.write_private_text(COOKIE_FILE, cookie)
+            for path in (KEY_FILE, QR_PNG):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
             print("登录成功，已写入 %s" % COOKIE_FILE)
             return 0
         if code == 86038:

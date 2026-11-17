@@ -7,7 +7,9 @@
 """
 
 import json
+import hmac
 import os
+import secrets
 import subprocess
 import sys
 import threading
@@ -33,8 +35,10 @@ PID_FILE = os.path.join(HERE, "collector.pid")
 DISABLED_FILE = os.path.join(HERE, "collector.disabled")
 CONSOLE_LOG = os.path.join(HERE, "console.log")
 READY_FILE = os.path.join(HERE, "console.ready")
+TOKEN_FILE = os.path.join(HERE, "console.token")
 UI_MUTEX = "Local\\BiliLiveWatch.Console.v1"
 _ui_mutex_handle = None
+_api_token = ""
 TZ = timezone(timedelta(hours=8))
 PYTHONW = (sys.executable if getattr(sys, "frozen", False)
            else os.path.join(os.path.dirname(sys.executable), "pythonw.exe"))
@@ -47,6 +51,8 @@ MAX_EVENTS = 50000
 CREATE_NO_WINDOW = 0x08000000
 _alive = {"pid": None, "at": 0.0, "ok": False}
 _scan = {"at": 0.0, "pid": None}
+
+import local_security
 
 if not _HAD_STDOUT:
     try:
@@ -90,6 +96,29 @@ def write_ready():
             fh.write("%d %d\n" % (os.getpid(), int(time.time())))
     except OSError:
         pass
+
+
+def create_api_token():
+    global _api_token
+    _api_token = secrets.token_urlsafe(32)
+    local_security.write_private_text(TOKEN_FILE, _api_token + "\n")
+    return _api_token
+
+
+def read_api_token():
+    try:
+        with open(TOKEN_FILE, "r", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def local_url():
+    return "http://127.0.0.1:%d/?token=%s" % (PORT, _api_token)
+
+
+def public_url():
+    return "http://127.0.0.1:%d/" % PORT
 
 
 def ready_heartbeat():
@@ -540,6 +569,7 @@ box-shadow:0 8px 22px rgba(0,0,0,.4)}
 </main>
 <script>
 const $=s=>document.querySelector(s);
+const API_TOKEN=new URLSearchParams(location.search).get('token')||'';
 let recentKind='all', lastCount=-1;
 async function loadRecent(){
   const d=await api('/api/events?kind='+recentKind+'&limit=200');
@@ -556,7 +586,11 @@ document.querySelectorAll('#recentFilter .chip').forEach(b=>{
   b.onclick=()=>{document.querySelectorAll('#recentFilter .chip').forEach(x=>x.classList.remove('on'));
     b.classList.add('on'); recentKind=b.dataset.kind; loadRecent();};
 });
-async function api(path,opt){const r=await fetch(path,opt);return r.json();}
+async function api(path,opt={}){const headers=new Headers(opt.headers||{});
+  headers.set('X-DD-Token',API_TOKEN);
+  const r=await fetch(path,{...opt,headers});
+  if(!r.ok)throw new Error('HTTP '+r.status);
+  return r.json();}
 function cards(el,items){el.innerHTML=items.map(([k,v])=>
   `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');}
 function bars(el,arr){const m=Math.max(1,...arr);el.innerHTML=arr.map((n,i)=>
@@ -624,10 +658,22 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(body)
 
+    def _authorized(self):
+        query = parse_qs(urlparse(self.path).query)
+        supplied = (self.headers.get("X-DD-Token")
+                    or (query.get("token") or [""])[0])
+        return bool(_api_token and supplied and
+                    hmac.compare_digest(supplied, _api_token))
+
     def do_GET(self):
+        if not self._authorized():
+            return self._send(403, json.dumps({"error": "forbidden"}))
         path = urlparse(self.path).path
         if path in ("/", "/index.html"):
             return self._send(200, PAGE, "text/html; charset=utf-8")
@@ -647,6 +693,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, json.dumps({"error": "not found"}))
 
     def do_POST(self):
+        if not self._authorized():
+            return self._send(403, json.dumps({"error": "forbidden"}))
         path = urlparse(self.path).path
         length = int(self.headers.get("Content-Length") or 0)
         try:
@@ -687,16 +735,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    url = "http://127.0.0.1:%d/" % PORT
     if not acquire_console_lock():
         for _ in range(40):
             if console_port_open():
                 break
             time.sleep(0.25)
-        print("控制台已经在运行：%s" % url)
-        if "--no-browser" not in sys.argv and console_port_open():
+        existing_token = read_api_token()
+        url = ("http://127.0.0.1:%d/?token=%s" % (PORT, existing_token)
+               if existing_token else "http://127.0.0.1:%d/" % PORT)
+        print("控制台已经在运行：%s" % public_url())
+        if "--no-browser" not in sys.argv and console_port_open() and existing_token:
             webbrowser.open(url)
         return
+    create_api_token()
+    url = local_url()
     threading.Thread(target=refresh_live_status, daemon=True).start()
     # 采集器的生命周期由 bili_watchdog.py 独立守护；这里只是兜底，且尊重「停止采集」标记
     if not os.path.isfile(DISABLED_FILE) and not read_pid():
@@ -708,13 +760,16 @@ def main():
         print("控制台端口 %d 启动失败：%s" % (PORT, exc))
         if console_port_open():
             print("已有控制台在监听，本次进程退出。")
-            if "--no-browser" not in sys.argv:
+            existing_token = read_api_token()
+            url = ("http://127.0.0.1:%d/?token=%s" % (PORT, existing_token)
+                   if existing_token else "http://127.0.0.1:%d/" % PORT)
+            if "--no-browser" not in sys.argv and existing_token:
                 webbrowser.open(url)
             return
         raise
     write_ready()
     threading.Thread(target=ready_heartbeat, daemon=True).start()
-    print("控制台已启动：%s" % url)
+    print("控制台已启动：%s（访问令牌见 console.token）" % public_url())
     if "--no-browser" not in sys.argv:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     try:
@@ -732,6 +787,10 @@ def main():
             if ready_pid == os.getpid():
                 os.remove(READY_FILE)
         except Exception:
+            pass
+        try:
+            os.remove(TOKEN_FILE)
+        except OSError:
             pass
 
 

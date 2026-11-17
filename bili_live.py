@@ -43,6 +43,7 @@ import brotli
 import websockets
 
 import bili_pb
+import local_security
 import live_report_view
 
 try:
@@ -198,7 +199,9 @@ def cookie():
         print("缺少 cookie.txt，请先运行 bili_login.py --qr / --poll。")
         sys.exit(2)
     with open(COOKIE_FILE, "r", encoding="utf-8") as fh:
-        return fh.read().strip()
+        value = fh.read().strip()
+    local_security.restrict_private_file(COOKIE_FILE)
+    return value
 
 
 def cookie_uid():
@@ -468,8 +471,18 @@ def normalize(msg, rid):
         elif cmd == "GUARD_BUY":
             ev.update(uid=data.get("uid"), uname=data.get("username"),
                       guard=GUARD.get(data.get("guard_level"), data.get("guard_level")),
-                      num=data.get("num"), price=data.get("price"))
+                      num=data.get("num"), price=data.get("price"),
+                      payflow_id=data.get("payflow_id"))
             apply_medal_fields(ev, data.get("medal_info"))
+        elif cmd == "USER_TOAST_MSG":
+            guard_level = data.get("guard_level")
+            ev.update(
+                uid=data.get("uid"), uname=data.get("uname"),
+                guard=GUARD.get(guard_level) or data.get("role_name") or guard_level,
+                num=data.get("num") or 1,
+                guard_paid_price=data.get("price"),
+                payflow_id=data.get("payflow_id"),
+                detail=json.dumps(data, ensure_ascii=False)[:2000])
         elif cmd in ("SUPER_CHAT_MESSAGE", "SUPER_CHAT_MESSAGE_JPN"):
             # 日文副本与主事件是同一笔，统一成同一个 cmd，避免重复计数
             ev["cmd"] = "SUPER_CHAT_MESSAGE"
@@ -534,12 +547,14 @@ def normalize(msg, rid):
 
 def event_key(ev):
     body = ev.get("text") or ev.get("gift") or ev.get("guard") or ev.get("interact") or ""
-    key = "%s|%s|%s|%s|%s" % (ev.get("room"), ev.get("uid"), ev.get("cmd"),
-                              int((ev.get("ts") or 0) // 60000), body)
-    if ev.get("src") == "manual":
-        # 手工补录是逐条核对后写入的，不能与同分钟的真实记录互相覆盖
-        key += "|manual:%s" % (ev.get("manual_id") or ev.get("ts") or 0)
-    return key
+    try:
+        quantity = int(ev.get("num") or 1)
+    except (TypeError, ValueError):
+        quantity = 1
+    return "%s|%s|%s|%s|%s|%.2f|%d|%s" % (
+        ev.get("room"), ev.get("uid"), ev.get("cmd"),
+        int((ev.get("ts") or 0) // 60000), " ".join(str(body).split()),
+        yuan_of(ev), quantity, ev.get("coin_type") or "")
 
 
 def yuan_of(ev):
@@ -550,7 +565,14 @@ def yuan_of(ev):
     if cmd == "SUPER_CHAT_MESSAGE":
         return price
     if cmd == "GUARD_BUY":
-        return price / 1000.0
+        # 手动补录保存的是总金额；实时与 danmakus 的 price 是单月单价。
+        if ev.get("src") == "manual":
+            return price / 1000.0
+        # B 站实时 GUARD_BUY.data.price 可能是原价；danmakus 的 Guard.priceMilli
+        # 是实际单价。跨来源匹配后，优先使用确认过的实付单价。
+        if ev.get("paid_price") is not None:
+            price = float(ev.get("paid_price") or 0)
+        return price * float(ev.get("num") or 1) / 1000.0
     if cmd == "SEND_GIFT":
         if ev.get("free"):
             return 0.0
@@ -643,9 +665,15 @@ def _collapse_exact(events):
             body = " ".join(str(
                 event.get("text") or event.get("gift") or event.get("guard")
                 or event.get("interact") or "").split())
+        try:
+            quantity = int(event.get("num") or 1)
+        except (TypeError, ValueError):
+            quantity = 1
         key = (
             event.get("room"), event.get("uid"), cmd,
             int(event.get("ts") or 0), body, round(yuan_of(event), 2),
+            quantity, event.get("coin_type") or "",
+            event.get("manual_id") if event.get("src") == "manual" else "",
         )
         groups[key].append(event)
     priority = {"manual": 0, "live": 1, "backfill": 2, "danmakus": 3}
@@ -687,39 +715,255 @@ def _collapse_entries(events):
     return out
 
 
+def _guard_toast_info(event):
+    if event.get("cmd") != "USER_TOAST_MSG":
+        return None
+    detail = {}
+    raw_detail = str(event.get("detail") or "")
+    try:
+        parsed = json.loads(raw_detail)
+        if isinstance(parsed, dict):
+            detail = parsed
+    except Exception:
+        pass
+
+    def number(name):
+        value = event.get(name)
+        if name == "price" and value is None:
+            value = event.get("guard_paid_price")
+        if value is None:
+            value = detail.get(name)
+        if value is None:
+            match = re.search(r'"%s"\s*:\s*"?(-?\d+(?:\.\d+)?)' % re.escape(name),
+                              raw_detail)
+            value = match.group(1) if match else None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    level = number("guard_level")
+    paid_price = number("price")
+    count = number("num")
+    role_name = detail.get("role_name")
+    if not role_name:
+        match = re.search(r'"role_name"\s*:\s*"([^"]+)"', raw_detail)
+        role_name = match.group(1) if match else ""
+    guard = GUARD.get(int(level)) if level else None
+    guard = guard or role_name or event.get("guard")
+    if not guard or paid_price is None or paid_price <= 0:
+        return None
+    return {
+        "room": event.get("room"),
+        "uid": event.get("uid"),
+        "collector_run": event.get("collector_run") or "",
+        "guard": guard,
+        "num": max(1, int(count or 1)),
+        "paid_price": paid_price,
+        "payflow_id": event.get("payflow_id") or detail.get("payflow_id") or "",
+        "ts": int(event.get("ts") or 0),
+    }
+
+
+def _apply_local_guard_toast_prices(events):
+    """把本地 USER_TOAST_MSG 携带的实际上舰价格配对回 GUARD_BUY。"""
+    toasts = defaultdict(list)
+    for event in events:
+        info = _guard_toast_info(event)
+        if not info:
+            continue
+        key = (info["room"], info["uid"], info["collector_run"],
+               info["guard"], info["num"])
+        toasts[key].append(info)
+    for values in toasts.values():
+        values.sort(key=lambda item: item["ts"])
+
+    used = set()
+    out = []
+    for event in events:
+        if (event.get("cmd") != "GUARD_BUY"
+                or event.get("src") != "live"
+                or event.get("paid_price") is not None):
+            out.append(event)
+            continue
+        try:
+            quantity = max(1, int(event.get("num") or 1))
+        except (TypeError, ValueError):
+            quantity = 1
+        key = (event.get("room"), event.get("uid"),
+               event.get("collector_run") or "", event.get("guard"), quantity)
+        stamp = int(event.get("ts") or 0)
+        match, best_diff = None, None
+        for info in toasts.get(key, []):
+            identity = (key, info["ts"], info["paid_price"], info["payflow_id"])
+            if identity in used:
+                continue
+            diff = abs(info["ts"] - stamp)
+            if diff <= 3000 and (best_diff is None or diff < best_diff):
+                match, best_diff = info, diff
+        if not match:
+            out.append(event)
+            continue
+        identity = (key, match["ts"], match["paid_price"], match["payflow_id"])
+        used.add(identity)
+        merged = dict(event)
+        merged["gross_price"] = float(event.get("price") or 0)
+        merged["paid_price"] = match["paid_price"]
+        merged["paid_price_src"] = "USER_TOAST_MSG"
+        if match["payflow_id"]:
+            merged["payflow_id"] = match["payflow_id"]
+        out.append(merged)
+    return out
+
+
 def dedupe_events(events):
     """跨来源去重：同一条事件可能被实时流与回补/导入各记一次，只保留一份；
     但同一来源内的重复记录是真实发生的（例如同分钟送两次同样的礼物），必须保留。
     例外：账号级通知（personal）是广播到所有连接的副本，10 秒内同内容只算一条。"""
+    events = _apply_local_guard_toast_prices(events)
     events = _collapse_exact(events)
     events = _collapse_sc(events)
     events = _collapse_personal(events)
     events = _collapse_entries(events)
-    groups = {}
-    for e in events:
-        groups.setdefault(event_key(e), []).append(e)
-    out = []
-    for group in groups.values():
-        by_src = {}
-        for e in group:
-            by_src.setdefault(e.get("src") or "live", []).append(e)
-        picked = []
-        keep = 0
-        for src in ("manual", "live", "backfill", "danmakus"):
-            entries = by_src.get(src, [])
-            if src in ("live", "backfill") and entries:
-                # 每个采集器会话独立计数：同一事件被两个并发采集器各写一次时，
-                # 取记录最完整的那一路，不把真实重复（同一分钟两次同礼物）抹掉。
-                sessions = {}
-                for e in entries:
-                    sessions.setdefault(e.get("collector_run") or "", []).append(e)
-                entries = max(sessions.values(), key=len)
-            if entries:
-                keep = max(keep, len(entries))
-                picked.extend(entries)
-        out.extend(picked[:keep])
-    out.sort(key=lambda e: e.get("ts") or 0)
-    return out
+    return _merge_observations(events)
+
+
+def _observation_identity(event):
+    cmd = str(event.get("cmd") or "")
+    if _is_entry_event(event):
+        cmd, body = "ENTRY_EFFECT", "进入直播间"
+    else:
+        body = " ".join(str(
+            event.get("text") or event.get("gift") or event.get("guard")
+            or event.get("interact") or "").split())
+    try:
+        quantity = int(event.get("num") or 1)
+    except (TypeError, ValueError):
+        quantity = 1
+    return (
+        event.get("room"), event.get("uid"), cmd, body,
+        round(yuan_of(event), 2), quantity, event.get("coin_type") or "",
+    )
+
+
+def _observation_tolerance(a, b):
+    if "manual" in (a.get("src"), b.get("src")):
+        manual = a if a.get("src") == "manual" else b
+        return 30 * 60 * 1000 if manual.get("estimated") else 2 * 60 * 1000
+    if _is_entry_event(a) and _is_entry_event(b):
+        return _ENTRY_DEDUPE_MS
+    return 10000
+
+
+def _observation_conflict_core(event):
+    cmd = str(event.get("cmd") or "")
+    body = " ".join(str(
+        event.get("text") or event.get("gift") or event.get("guard")
+        or event.get("interact") or "").split())
+    try:
+        quantity = int(event.get("num") or 1)
+    except (TypeError, ValueError):
+        quantity = 1
+    return (event.get("room"), event.get("uid"), cmd, body,
+            quantity, event.get("coin_type") or "")
+
+
+def _with_confirmed_guard_price(local_event, remote_event):
+    """保留本地观测，同时采用 danmakus 确认的实际上舰单价。"""
+    if (local_event.get("cmd") != "GUARD_BUY"
+            or remote_event.get("cmd") != "GUARD_BUY"
+            or remote_event.get("src") != "danmakus"):
+        return local_event
+    local_price = float(local_event.get("price") or 0)
+    paid_price = float(remote_event.get("price") or 0)
+    if local_price <= 0 or paid_price <= 0:
+        return local_event
+    if round(yuan_of(local_event), 2) == round(yuan_of(remote_event), 2):
+        return local_event
+    merged = dict(local_event)
+    merged["gross_price"] = local_price
+    merged["paid_price"] = paid_price
+    merged["paid_price_src"] = "danmakus"
+    return merged
+
+
+def _merge_source_batch(canonical, incoming):
+    """把一路采集结果与已选事件一对一匹配，未匹配的重复事件完整保留。"""
+    used = set()
+    additions = defaultdict(list)
+    conflict_index = defaultdict(list)
+    for identity, pairs in canonical.items():
+        for index, existing in pairs:
+            conflict_index[_observation_conflict_core(existing)].append(
+                (identity, index, existing))
+    for event in sorted(incoming, key=lambda e: e.get("ts") or 0):
+        stamp = int(event.get("ts") or 0)
+        identity = _observation_identity(event)
+        best_index, best_diff = None, None
+        best_existing = None
+        for index, existing in canonical.get(identity, []):
+            if (identity, index) in used:
+                continue
+            diff = abs(int(existing.get("ts") or 0) - stamp)
+            if diff <= _observation_tolerance(existing, event):
+                if best_diff is None or diff < best_diff:
+                    best_index, best_diff = index, diff
+        best_identity = identity
+        if best_index is None and event.get("src") != "manual":
+            for existing_identity, index, existing in conflict_index.get(
+                    _observation_conflict_core(event), []):
+                if (existing_identity, index) in used or existing.get("src") == "manual":
+                    continue
+                # 只有上舰存在“原价字段 vs 实际成交价”的同笔冲突。
+                # 普通礼物价格不同就是不同交易，必须分别保留。
+                if str(event.get("cmd") or "") != "GUARD_BUY":
+                    continue
+                diff = abs(int(existing.get("ts") or 0) - stamp)
+                if diff <= 3000 and (best_diff is None or diff < best_diff):
+                    best_identity, best_index, best_diff = (
+                        existing_identity, index, diff)
+                    best_existing = existing
+        if best_index is None:
+            additions[identity].append(event)
+        else:
+            used.add((best_identity, best_index))
+            if best_existing is not None:
+                corrected = _with_confirmed_guard_price(best_existing, event)
+                if corrected is not best_existing:
+                    for position, (index, _) in enumerate(canonical[best_identity]):
+                        if index == best_index:
+                            canonical[best_identity][position] = (index, corrected)
+                            break
+    for identity, events in additions.items():
+        canonical.setdefault(identity, [])
+        for event in events:
+            canonical[identity].append((len(canonical[identity]), event))
+
+
+def _merge_observations(events):
+    """按来源优先级合并重复观测，但不同金额、数量或时间的事件不互相覆盖。"""
+    by_src = defaultdict(list)
+    for event in events:
+        by_src[event.get("src") or "live"].append(event)
+
+    batches = [list(by_src.pop("manual", []))]
+    for src in ("live", "backfill"):
+        sessions = defaultdict(list)
+        for event in by_src.pop(src, []):
+            sessions[event.get("collector_run") or ""].append(event)
+        batches.extend(sorted(sessions.values(), key=len, reverse=True))
+    batches.append(list(by_src.pop("danmakus", [])))
+    for source in sorted(by_src):
+        batches.append(list(by_src[source]))
+
+    canonical = defaultdict(list)
+    for batch in batches:
+        if not batch:
+            continue
+        _merge_source_batch(canonical, batch)
+    accepted = [event for pairs in canonical.values() for _, event in pairs]
+    accepted.sort(key=lambda e: e.get("ts") or 0)
+    return accepted
 
 
 def parse_timeline(s):
@@ -895,13 +1139,20 @@ def manual_schema():
 
 
 def fetch_backfill(rid, ck, mid):
-    """回补直播间最近约 10 分钟的弹幕，只挑出登录用户本人的。"""
+    """回补直播间最近约 10 分钟的弹幕，返回（本人事件，是否成功）。"""
     events = []
+    ok = True
     try:
         j = get("https://api.live.bilibili.com/xlive/web-room/v1/dM/gethistory?roomid=%d" % rid, ck)
+        if j.get("code") not in (None, 0):
+            raise RuntimeError("接口返回 %s：%s" % (
+                j.get("code"), j.get("message") or "未知错误"))
         data = j.get("data") or {}
         items = (data.get("room") or []) + (data.get("admin") or [])
-    except Exception:
+    except Exception as exc:
+        print("[%s] 最近弹幕回补失败：%s" % (rid, exc))
+        print("[%s] 断线期间的礼物、SC、上舰需要等待 danmakus 增量同步补齐。" % rid)
+        ok = False
         items = []
     for it in items:
         text = (it.get("text") or "").strip()
@@ -910,10 +1161,12 @@ def fetch_backfill(rid, ck, mid):
         events.append({"ts": parse_timeline(it.get("timeline")), "room": rid, "cmd": "DANMU_MSG",
                        "uid": it.get("uid"), "uname": it.get("nickname"), "text": text,
                        "src": "backfill"})
-    return events
+    return events, ok
 
 
 async def watch(rid, ck, mid, out, stop):
+    host_index = 0
+    fail_attempt = 0
     while not stop["done"]:
         try:
             info = (live_api("/xlive/web-room/v1/index/getDanmuInfo", {"id": rid, "type": 0}, ck).get("data") or {})
@@ -922,7 +1175,7 @@ async def watch(rid, ck, mid, out, stop):
             if not hosts or not token:
                 await asyncio.sleep(30)
                 continue
-            h = hosts[0]
+            h = hosts[host_index % len(hosts)]
             url = "wss://%s:%s/sub" % (h["host"], h["wss_port"])
             # 关闭客户端库自带的 ping 保活：B 站用协议内的 op=2 心跳，
             # 库的 ping 常被判超时而误重连，造成采集盲区。
@@ -931,16 +1184,22 @@ async def watch(rid, ck, mid, out, stop):
                 auth = {"uid": mid, "roomid": rid, "protover": 2, "platform": "web",
                         "type": 2, "key": token}
                 await ws.send(pack(7, json.dumps(auth).encode()))
+                fail_attempt = 0
                 print("[%s] 已连接弹幕流" % rid)
-                for ev in await asyncio.to_thread(fetch_backfill, rid, ck, mid):
+                backfill_events, backfill_ok = await asyncio.to_thread(
+                    fetch_backfill, rid, ck, mid)
+                for ev in backfill_events:
                     out.write(ev)
-                print("[%s] 已回补最近弹幕" % rid)
+                print("[%s] %s" % (
+                    rid, "已回补最近弹幕" if backfill_ok
+                    else "最近弹幕回补失败，已记录原因"))
                 last_hb = time.time()
                 received = mine_count = others = 0
                 last_stat = time.time()
                 session_start = time.time()
                 while not stop["done"]:
                     if time.time() - session_start > 1800:  # 每 30 分钟主动换一次连接
+                        host_index += 1
                         break
                     try:
                         raw = await asyncio.wait_for(ws.recv(), timeout=10)
@@ -976,8 +1235,12 @@ async def watch(rid, ck, mid, out, stop):
                         last_hb = time.time()
         except Exception as exc:
             if not stop["done"]:
-                print("[%s] 连接异常，8 秒后重连：%s" % (rid, exc))
-                await asyncio.sleep(8)
+                host_index += 1
+                fail_attempt += 1
+                delay = min(30, 2 ** min(fail_attempt, 5))
+                print("[%s] 连接异常，%d 秒后切换节点重连：%s"
+                      % (rid, delay, exc))
+                await asyncio.sleep(delay)
 
 
 async def watch_dynamic(rooms, ck, mid, out, stop, interval, cap):
@@ -1042,8 +1305,8 @@ def _health_problem():
     now = time.time()
     if now - _health["start"] > 600 and _health["cycles"] == 0:
         return "启动 10 分钟仍未完成第一轮刷新（疑似卡死在网络调用）"
-    if _health["live"] > 0 and now - _health["last_frame"] > 900:
-        return "有 %d 个在线房间，却已连续 15 分钟收不到任何服务器消息（疑似连接失效）" % _health["live"]
+    if _health["live"] > 0 and now - _health["last_frame"] > 300:
+        return "有 %d 个在线房间，却已连续 5 分钟收不到任何服务器消息（疑似连接失效）" % _health["live"]
     return None
 
 
@@ -1070,7 +1333,7 @@ async def heartbeat(stop):
 
 
 _limit = {"seconds": 0, "follow": False, "interval": 60, "cap": 25, "all": False,
-          "rotate_mb": 256, "keep": 3}
+          "rotate_mb": 256, "keep": 0}
 
 
 def cmd_collect():
@@ -1158,11 +1421,12 @@ def bars(counter, top=15):
 
 
 class Sink:
-    """事件落盘 + 按大小轮转，避免长期运行时文件无限增长。"""
+    """事件落盘 + 按大小归档；历史分片只增不删。"""
 
-    def __init__(self, path, limit_mb, keep=3):
+    def __init__(self, path, limit_mb, keep=0):
         self.path = path
         self.limit = limit_mb * 1024 * 1024
+        # 保留参数用于旧配置兼容；数据分片不再自动删除。
         self.keep = keep
         # buffering=1 行缓冲：每条事件立即落盘。
         # 否则进程被强杀时，缓冲区里未 flush 的记录会直接丢失。
@@ -1192,20 +1456,22 @@ class Sink:
             return
         try:
             self.fh.close()
-            stamp = datetime.now(TZ).strftime("%Y%m%d-%H%M")
-            os.replace(self.path, "%s.%s.jsonl" % (self._base(), stamp))
+            stamp = datetime.now(TZ).strftime("%Y%m%d-%H%M%S")
+            target = "%s.%s.jsonl" % (self._base(), stamp)
+            suffix = 1
+            while os.path.exists(target):
+                target = "%s.%s-%d.jsonl" % (self._base(), stamp, suffix)
+                suffix += 1
+            os.replace(self.path, target)
             self.fh = open(self.path, "a", encoding="utf-8", buffering=1)
-            print("日志已轮转 -> %s.%s.jsonl" % (self._base(), stamp))
+            print("数据分片已归档 -> %s" % target)
         except Exception as exc:
-            print("轮转失败：%s" % exc)
-            return
-        import glob
-        old = sorted(glob.glob("%s.*.jsonl" % self._base()))
-        for p in old[:-self.keep]:
+            print("数据分片归档失败：%s" % exc)
             try:
-                os.remove(p)
-            except OSError:
-                pass
+                if self.fh.closed:
+                    self.fh = open(self.path, "a", encoding="utf-8", buffering=1)
+            except Exception as reopen_exc:
+                print("数据分片重新打开失败：%s" % reopen_exc)
 
     def close(self):
         try:

@@ -4,16 +4,28 @@
 
 接口只监听本机 `127.0.0.1`，不会向局域网或外网开放。使用前需要先通过客户端打开“互动记录”。
 
+互动记录服务启动后会在程序目录生成一次性的 `console.token`。所有 `/api/*` 请求必须携带：
+
+```http
+X-DD-Token: <console.token 内容>
+```
+
+无令牌或令牌不匹配时返回 HTTP 403。服务退出时会删除 `console.token`。
+
 ## 查看手动补录格式
 
 ```http
 GET /api/manual
+X-DD-Token: <console.token 内容>
 ```
 
 PowerShell：
 
 ```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:8765/api/manual"
+$token = (Get-Content -LiteralPath "<DD轨迹程序目录>\console.token" -Raw).Trim()
+Invoke-RestMethod `
+  -Uri "http://127.0.0.1:8765/api/manual" `
+  -Headers @{ "X-DD-Token" = $token }
 ```
 
 ## 手动补录
@@ -21,6 +33,7 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8765/api/manual"
 ```http
 POST /api/manual
 Content-Type: application/json
+X-DD-Token: <console.token 内容>
 ```
 
 字段：
@@ -53,6 +66,7 @@ Invoke-RestMethod `
   -Uri "http://127.0.0.1:8765/api/manual" `
   -Method Post `
   -ContentType "application/json" `
+  -Headers @{ "X-DD-Token" = $token } `
   -Body $body
 ```
 

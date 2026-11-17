@@ -431,8 +431,21 @@ def _semantic(event):
 
 def _match_key(event):
     cmd, content = _semantic(event)
+    try:
+        quantity = int(event.get("num") or 1)
+    except (TypeError, ValueError):
+        quantity = 1
     return (int(event.get("room") or 0), cmd, content,
-            round(L.yuan_of(event), 2))
+            round(L.yuan_of(event), 2), quantity)
+
+
+def _conflict_key(event):
+    cmd, content = _semantic(event)
+    try:
+        quantity = int(event.get("num") or 1)
+    except (TypeError, ValueError):
+        quantity = 1
+    return (int(event.get("room") or 0), cmd, content, quantity)
 
 
 def _tolerance_ms(event):
@@ -445,9 +458,14 @@ def _tolerance_ms(event):
 
 def compare(local_events, remote_events):
     buckets = defaultdict(list)
+    conflict_buckets = defaultdict(list)
     for index, event in enumerate(local_events):
         buckets[_match_key(event)].append((int(event.get("ts") or 0), index))
+        conflict_buckets[_conflict_key(event)].append(
+            (int(event.get("ts") or 0), index))
     for values in buckets.values():
+        values.sort()
+    for values in conflict_buckets.values():
         values.sort()
 
     used = set()
@@ -464,6 +482,18 @@ def compare(local_events, remote_events):
             diff = abs(local_stamp - stamp)
             if diff <= tolerance and (best_diff is None or diff < best_diff):
                 best, best_diff = index, diff
+        if best is None and _semantic(event)[0] == "GUARD_BUY":
+            for local_stamp, index in conflict_buckets.get(
+                    _conflict_key(event), []):
+                if index in used:
+                    continue
+                local_event = local_events[index]
+                tolerance = _tolerance_ms(local_event)
+                if local_event.get("src") != "manual":
+                    tolerance = min(tolerance, 3000)
+                diff = abs(local_stamp - stamp)
+                if diff <= tolerance and (best_diff is None or diff < best_diff):
+                    best, best_diff = index, diff
         if best is None:
             remote_only.append(event)
         else:

@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.parse
 import urllib.request
 import webbrowser
 from ctypes import wintypes
@@ -40,6 +41,7 @@ WATCHDOG_ALIVE_FILE = os.path.join(APP_DIR, "watchdog.alive")
 REPORT_FILE = os.path.join(APP_DIR, "live_report.html")
 CONSOLE_LOG = os.path.join(APP_DIR, "console.log")
 CONSOLE_READY = os.path.join(APP_DIR, "console.ready")
+CONSOLE_TOKEN = os.path.join(APP_DIR, "console.token")
 ACCOUNT_IDENTITY_FILE = os.path.join(APP_DIR, "account_identity.json")
 ICON_FILE = os.path.join(APP_DIR, "assets", "app-icon.ico")
 DEFAULT_DATA_DIR = os.path.join(APP_DIR, "data")
@@ -58,11 +60,11 @@ if not os.path.exists(PYTHONW):
     PYTHONW = sys.executable
 
 DEFAULT_SETTINGS = {
-    "follow": True, "interval": 60, "cap": 25, "rotate_mb": 64, "keep": 2,
+    "follow": True, "interval": 60, "cap": 25, "rotate_mb": 64, "keep": 0,
     "close_behavior": "tray", "minimize_behavior": "tray",
     "data_dir": DEFAULT_DATA_DIR,
 }
-URL = "http://127.0.0.1:8765/"
+URL_BASE = "http://127.0.0.1:8765/"
 
 
 def acquire_client_lock():
@@ -137,6 +139,8 @@ def load_settings():
             data.update({k: saved[k] for k in data if k in saved})
     except Exception:
         pass
+    # 事件分片只归档不删除；旧配置中的 keep 不再允许触发清理。
+    data["keep"] = 0
     return data
 
 
@@ -272,6 +276,8 @@ def clear_login_files(base_dir=None):
     targets = [
         os.path.join(base_dir, "cookie.txt"),
         os.path.join(base_dir, "account_identity.json"),
+        os.path.join(base_dir, "qr.png"),
+        os.path.join(base_dir, "qr_key.txt"),
     ]
     targets.extend(glob.glob(os.path.join(base_dir, "account_avatar_*.png")))
     removed = []
@@ -291,7 +297,7 @@ def build_args(settings):
     args += ["--interval", str(int(settings.get("interval", 60))),
              "--cap", str(int(settings.get("cap", 25))),
              "--rotate-mb", str(int(settings.get("rotate_mb", 64))),
-             "--keep", str(int(settings.get("keep", 2)))]
+             "--keep", str(int(settings.get("keep", 0)))]
     return args
 
 
@@ -493,20 +499,28 @@ def open_console():
     ok, msg = ensure_console_service()
     if not ok:
         return False, msg
+    try:
+        with open(CONSOLE_TOKEN, "r", encoding="utf-8") as fh:
+            token = fh.read().strip()
+    except OSError:
+        return False, "互动记录令牌不可用，请查看 console.log。"
+    if not token:
+        return False, "互动记录令牌为空，请查看 console.log。"
+    url = URL_BASE + "?token=" + urllib.parse.quote(token, safe="")
     browser_opened = False
     try:
-        os.startfile(URL)
+        os.startfile(url)
         browser_opened = True
     except Exception:
         pass
     if not browser_opened:
         try:
-            browser_opened = bool(webbrowser.open(URL, new=2))
+            browser_opened = bool(webbrowser.open(url, new=2))
         except Exception:
             pass
     if not browser_opened:
-        return False, "互动记录已运行，但默认浏览器未能打开，请手动访问 %s" % URL
-    return True, "已打开互动记录：%s" % URL
+        return False, "互动记录已运行，但默认浏览器未能打开"
+    return True, "已打开互动记录"
 
 
 def stop_console_service():
@@ -521,21 +535,39 @@ def stop_console_service():
         os.remove(CONSOLE_READY)
     except OSError:
         pass
+    try:
+        os.remove(CONSOLE_TOKEN)
+    except OSError:
+        pass
 
 
 def migrate_collection_data(old_dir, new_dir):
-    """把当前采集文件复制到新目录；不覆盖目标目录已有文件。"""
+    """复制采集、danmakus 基线和同步状态；不覆盖目标目录已有文件。"""
     old_dir = os.path.abspath(old_dir)
     new_dir = os.path.abspath(new_dir)
     if old_dir == new_dir:
         return []
     os.makedirs(new_dir, exist_ok=True)
     copied = []
-    for source in sorted(glob.glob(os.path.join(old_dir, "live_events*.jsonl"))):
+    patterns = (
+        "live_events*.jsonl",
+        "danmakus_v3_*",
+        "history_events*.jsonl",
+        "danmakus_history.json",
+        "live_account.json",
+    )
+    sources = []
+    for pattern in patterns:
+        sources.extend(glob.glob(os.path.join(old_dir, pattern)))
+    sources = sorted(set(sources))
+    for source in sources:
         name = os.path.basename(source)
         target = os.path.join(new_dir, name)
         if os.path.exists(target):
             raise FileExistsError("目标目录已存在 %s，请选择空目录。" % name)
+    for source in sources:
+        name = os.path.basename(source)
+        target = os.path.join(new_dir, name)
         shutil.copy2(source, target)
         copied.append(name)
     return copied
@@ -855,6 +887,11 @@ def run_gui():
         return
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
+    import local_security
+
+    cookie_path = os.path.join(APP_DIR, "cookie.txt")
+    if os.path.isfile(cookie_path):
+        local_security.restrict_private_file(cookie_path)
 
     BG, CARD, CARD2 = "#050912", "#0b1320", "#101c2c"
     FG, DIM, BORDER = "#eaf4ff", "#7f93ad", "#1b3450"
@@ -1226,7 +1263,7 @@ def run_gui():
         cap_var.set(str(cap))
         return {"follow": bool(follow_var.get()), "interval": interval, "cap": cap,
                 "rotate_mb": int(settings.get("rotate_mb", 64)),
-                "keep": int(settings.get("keep", 2))}
+                "keep": 0}
 
     close_options = {"隐藏到托盘": "tray", "彻底退出客户端": "exit"}
     minimize_options = {"隐藏到托盘": "tray", "最小化到任务栏": "taskbar"}
@@ -1266,6 +1303,7 @@ def run_gui():
         d_follow = tk.BooleanVar(value=bool(settings.get("follow", True)))
         d_interval = tk.StringVar(value=str(settings.get("interval", 60)))
         d_cap = tk.StringVar(value=str(settings.get("cap", 25)))
+        d_rotate = tk.StringVar(value=str(settings.get("rotate_mb", 64)))
         d_close = tk.StringVar(value=close_labels.get(
             settings.get("close_behavior"), "隐藏到托盘"))
         d_minimize = tk.StringVar(value=minimize_labels.get(
@@ -1385,6 +1423,15 @@ def run_gui():
         ttk.Spinbox(collect_card, from_=1, to=100, increment=1, width=10,
                     textvariable=d_cap).grid(
             row=3, column=1, sticky="w", padx=(10, 0), pady=4)
+        tk.Label(collect_card, text="事件分片归档阈值（MB）", bg=CARD, fg=FG,
+                 font=("Microsoft YaHei UI", 10)).grid(
+            row=4, column=0, sticky="w", pady=4)
+        ttk.Spinbox(collect_card, from_=8, to=4096, increment=8, width=10,
+                    textvariable=d_rotate).grid(
+            row=4, column=1, sticky="w", padx=(10, 0), pady=4)
+        tk.Label(collect_card, text="达到阈值后归档到新的 live_events.*.jsonl，旧分片永久保留。",
+                 bg=CARD, fg=DIM, font=("Microsoft YaHei UI", 9)).grid(
+            row=5, column=0, columnspan=4, sticky="w", pady=(4, 0))
         window_card = tk.Frame(body, bg=CARD, padx=18, pady=14,
                                highlightthickness=1, highlightbackground="#5a2a3d")
         window_card.pack(fill="x", pady=(12, 0))
@@ -1416,8 +1463,9 @@ def run_gui():
             try:
                 interval = max(30, min(600, int(d_interval.get())))
                 cap = max(1, min(100, int(d_cap.get())))
+                rotate_mb = max(8, min(4096, int(d_rotate.get())))
             except ValueError:
-                messagebox.showerror("输入有误", "刷新间隔和采集数量必须是数字。",
+                messagebox.showerror("输入有误", "刷新间隔、采集数量和归档阈值必须是数字。",
                                      parent=dlg)
                 return
             new_dir = os.path.abspath(os.path.expandvars(
@@ -1462,6 +1510,8 @@ def run_gui():
                 "follow": bool(d_follow.get()),
                 "interval": interval,
                 "cap": cap,
+                "rotate_mb": rotate_mb,
+                "keep": 0,
                 "close_behavior": close_options[d_close.get()],
                 "minimize_behavior": minimize_options[d_minimize.get()],
                 "data_dir": new_dir,
@@ -1471,6 +1521,7 @@ def run_gui():
             follow_var.set(new_settings["follow"])
             interval_var.set(str(interval))
             cap_var.set(str(cap))
+            d_rotate.set(str(rotate_mb))
             close_label_var.set(d_close.get())
             minimize_label_var.set(d_minimize.get())
             auto_var.set(bool(d_auto.get()))
@@ -1586,8 +1637,14 @@ def run_gui():
                 if code == 0:
                     cookie = bili_login.extract_cookie(data, set_cookie)
                     if "SESSDATA=" in cookie:
-                        with open(bili_login.COOKIE_FILE, "w", encoding="utf-8") as fh:
-                            fh.write(cookie)
+                        import local_security
+                        local_security.write_private_text(
+                            bili_login.COOKIE_FILE, cookie)
+                        for path in (bili_login.KEY_FILE, bili_login.QR_PNG):
+                            try:
+                                os.remove(path)
+                            except OSError:
+                                pass
                         set_status("登录成功，凭证已保存", GREEN)
                         identity_data = fetch_account_identity()
                         root.after(0, lambda: login_value.configure(

@@ -154,7 +154,7 @@ DD轨迹是独立开源项目，不是 B 站官方产品，也不代表 danmakus
 
 其他按钮：
 
-- 互动记录：打开 `http://127.0.0.1:8765/`；
+- 互动记录：启动本机互动记录服务，并打开带本次会话令牌的页面；
 - 生成报告：生成月、年和生涯报告并自动打开；
 - 刷新资产：更新 B 币、直播等级、亲密度和财富等级；
 - 手动补录：补录弹幕、礼物、SC、上舰或进入事件；
@@ -195,12 +195,21 @@ DD轨迹是独立开源项目，不是 B 站官方产品，也不代表 danmakus
 
 进入直播间只计入“入场记录”，不会计入互动次数和互动趋势。
 
+金额折算规则：
+
+- 金瓜子礼物按 `total_coin / 1000` 元计算，银瓜子礼物免费；
+- SC 的 `price` 本身就是元；
+- 实时上舰优先读取同一笔 `USER_TOAST_MSG.price` 的实际成交单价；
+- 没有本地结算事件时，用匹配到的 danmakus `Guard.priceMilli` 校正；
+- 上舰金额统一按 `实付单价 × 开通月数 / 1000` 元计算；
+- 手动补录的上舰保存的是总金额，按 `price / 1000` 元计算。
+
 ## 5. 互动记录
 
 点击客户端的“互动记录”，或访问：
 
 ```text
-http://127.0.0.1:8765/
+http://127.0.0.1:8765/?token=<本次会话令牌>
 ```
 
 页面包括：
@@ -234,7 +243,8 @@ http://127.0.0.1:8765/
 - 最大并发采集数；
 - 开机自启；
 - 关闭按钮行为；
-- 最小化按钮行为。
+- 最小化按钮行为；
+- 事件分片归档阈值。
 
 设置页支持纵向滚动。保存后，采集参数在下一次启动采集时生效。
 
@@ -267,6 +277,7 @@ DD轨迹.exe --autostart
 | 文件 | 内容 |
 |---|---|
 | `data\live_events.jsonl` | 实时采集和手动补录 |
+| `data\live_events.YYYYMMDD-HHMMSS.jsonl` | 达到归档阈值后保留的旧事件分片，不自动删除 |
 | `data\danmakus_v3_remote_events.jsonl` | 全部远程历史事件本地基线 |
 | `data\danmakus_v3_events.jsonl` | 本地缺失、需要补入的远程事件 |
 | `data\danmakus_v3_snapshot.json` | 远程直播场原始快照 |
@@ -278,9 +289,14 @@ DD轨迹.exe --autostart
 - `settings.json`：客户端设置；
 - `danmaku_sync_quota.json`：每日同步次数；
 - `account_avatar_<UID>_96.png`：账号头像缓存；
+- `console.token`：本次互动记录会话的临时访问令牌，服务退出后自动删除；
 - `cookie.txt`：登录凭证，禁止外传。
 
-在设置中切换数据目录时，程序会复制 `live_events*.jsonl` 到新目录，旧文件保留。
+在设置中切换数据目录时，程序会复制 `live_events*.jsonl` 和 `danmakus_v3_*` 到新目录，
+旧文件保留。目标同名文件已存在时不会覆盖。
+
+程序根目录的 `history_events*.jsonl`、`danmakus_history.json` 和
+`live_account.json` 属于固定共享文件，不随“采集数据目录”移动。
 
 ## 8. danmakus 增量同步
 
@@ -345,6 +361,9 @@ DD轨迹.exe sync-danmakus --full
 
 - `GET /api/manual`：查看格式；
 - `POST /api/manual`：提交补录。
+
+互动记录页面的所有 `/api/*` 请求都要求本次会话令牌。通过客户端打开的页面会自动携带；
+手工调用接口时，需要读取 `console.token` 并添加请求头 `X-DD-Token`。无令牌请求返回 HTTP 403。
 
 详细示例见 `API.md`。
 

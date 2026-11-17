@@ -14,6 +14,7 @@ a = Analysis(
         "bili_live_ui",
         "bili_watchdog",
         "bili_login",
+        "local_security",
         "danmaku_history_sync",
         "qrcode",
         "live_report_view",
