@@ -622,7 +622,7 @@ def sync_history(uid=None, progress=print, use_snapshot=False,
 
 
 def main():
-    print("开始同步 danmaku 数据...")
+    print("开始同步 danmakus 数据...")
     try:
         audit = sync_history(
             use_snapshot="--cached" in os.sys.argv[1:],

@@ -1,6 +1,8 @@
-# danmaku 数据同步
+# danmakus 数据同步
 
 基础地址：`https://api.ukamnads.icu`
+
+官网：<https://danmakus.com/>
 
 ## 使用接口
 
@@ -90,7 +92,7 @@ DD轨迹.exe sync-danmakus --full
 
 ## 客户端与每日次数
 
-客户端的按钮名称为“同步danmaku数据”。同步成功后会自动重启互动记录并生成报告。
+客户端的按钮名称为“同步danmakus数据”。同步成功后会自动重启互动记录并生成报告。
 
 - 每个香港自然日最多执行 5 次。
 - 第 1～5 次正常执行，不显示额度或剩余次数。

@@ -1809,20 +1809,20 @@ def run_gui():
                     stop_console_service()
                     ensure_console_service()
                 generate_report()
-                return ("danmaku同步完成：匹配 %d 条，本次新增 %d 条，"
+                return ("danmakus同步完成：匹配 %d 条，本次新增 %d 条，"
                         "当前补充集 %d 条；报告正在生成。" %
                         (audit["matched"], audit["remote_only_added"],
                          audit["supplement_total"]))
             except sync.DailySyncLimitExceeded:
                 root.after(0, lambda: messagebox.showwarning(
-                    "同步danmaku数据", "已到当日使用上限", parent=root))
+                    "同步danmakus数据", "已到当日使用上限", parent=root))
                 return None
 
         def finish():
             sync_state["running"] = False
             sync_button.configure(state="normal")
 
-        run_async("正在同步danmaku数据…", action, done=finish)
+        run_async("正在同步danmakus数据…", action, done=finish)
 
     manual_dialog = {"window": None}
 
@@ -2006,7 +2006,7 @@ def run_gui():
     neon_button(controls, "＋  手动补录", open_manual_dialog, accent=PURPLE).grid(
         row=1, column=1, sticky="ew", padx=4, pady=4)
     sync_button = neon_button(
-        controls, "⇄  同步danmaku数据", on_sync_history, accent=AMBER)
+        controls, "⇄  同步danmakus数据", on_sync_history, accent=AMBER)
     sync_button.grid(row=1, column=2, sticky="ew", padx=(4, 0), pady=4)
 
     log_card = cyber_card(outer, accent="#15334a", padx=14, pady=12)
