@@ -59,7 +59,8 @@ DD轨迹.exe sync-danmakus
 3. 上次仍在直播的场次会继续覆盖，避免漏掉跨同步时间的新事件；
 4. 只处理上次同步时间之后的新事件；
 5. 将全部远程事件保存在本地，并与实时采集、手工补录匹配；
-6. 只把新发现的本地缺失事件追加到补充集。
+6. 只把新发现的本地缺失事件追加到补充集；
+7. 已匹配但价格不同的上舰会写入独立价格校正文件。
 
 匹配时会同时比较房间、事件类型、内容、金额和数量。普通礼物价格不同即视为不同交易。
 上舰另有一个兼容规则：本地没有 `USER_TOAST_MSG` 实付价时，同内容、同数量且相差不超过
@@ -86,6 +87,7 @@ DD轨迹.exe sync-danmakus --full
 - `data\danmakus_v3_snapshot.json`
 - `data\danmakus_v3_remote_events.jsonl`：全部远程事件本地基线（匹配后的规范化数据）
 - `data\danmakus_v3_events.jsonl`
+- `data\danmakus_v3_guard_price_fixes.jsonl`：上舰原价与实际成交价的校正记录
 - `data\danmakus_v3_sync_audit.json`
 - `data\danmakus_v3_sync_state.json`：上次同步时间、远程事件数和补充集大小
 
@@ -93,6 +95,8 @@ DD轨迹.exe sync-danmakus --full
 
 - `remote_only_added`：本次同步真正新增到补充集的条数；
 - `supplement_total`：当前补充集总条数；
+- `guard_price_corrections_added`：本次新增或更新的上舰价格校正数；
+- `guard_price_corrections_total`：当前上舰价格校正总数；
 - `new_remote_events`：本次请求范围内、之前本地远程基线中不存在的新事件数。
 
 ## 客户端与每日次数

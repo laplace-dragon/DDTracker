@@ -29,12 +29,15 @@ const monthReport = path.resolve(process.argv[3] || "live_report-month.html");
   });
   const before = await page.evaluate(() => {
     const svg = document.querySelector("#careerTrendStage svg.career-trend");
+    const calendar = document.querySelector("#careerCalendarStage svg.career-calendar");
     const actions = document.getElementById("careerTrendActions");
     return {
       days: Number(svg.dataset.days),
       start: Number(svg.dataset.start),
       actions: actions.classList.contains("on"),
       xhit: Boolean(svg.querySelector(".x-axis-hit")),
+      calendarDays: Number(calendar?.dataset.days || 0),
+      calendarText: document.getElementById("careerCalendarMeta")?.textContent || "",
     };
   });
 
@@ -43,26 +46,51 @@ const monthReport = path.resolve(process.argv[3] || "live_report-month.html");
   await page.waitForTimeout(120);
   const filtered = await page.evaluate(() => {
     const svg = document.querySelector("#careerTrendStage svg.career-trend");
+    const calendar = document.querySelector("#careerCalendarStage svg.career-calendar");
     const actions = document.getElementById("careerTrendActions");
     return {
       days: Number(svg.dataset.days),
       start: Number(svg.dataset.start),
       actions: actions.classList.contains("on"),
       range: document.getElementById("careerTrendRange").textContent,
+      calendarDays: Number(calendar?.dataset.days || 0),
+      calendarText: document.getElementById("careerCalendarMeta")?.textContent || "",
     };
   });
   await page.locator(".trend-panel").screenshot({ path: "trend_filtered.png" });
+
+  const calendarTarget = await page.evaluate(() => {
+    const cells = Array.from(document.querySelectorAll("#careerCalendarStage .cell"));
+    const cell = cells[Math.max(0, Math.floor(cells.length * 0.7))];
+    const index = Number(cell.dataset.calendarIndex);
+    cell.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    return index;
+  });
+  await page.waitForTimeout(120);
+  const calendarDriven = await page.evaluate(() => {
+    const svg = document.querySelector("#careerTrendStage svg.career-trend");
+    const calendar = document.querySelector("#careerCalendarStage svg.career-calendar");
+    return {
+      start: Number(svg.dataset.start),
+      days: Number(svg.dataset.days),
+      calendarDays: Number(calendar.dataset.days),
+      calendarText: document.getElementById("careerCalendarMeta").textContent,
+    };
+  });
 
   await page.locator("#careerTrendReset").click();
   await page.waitForTimeout(120);
   const restored = await page.evaluate(() => {
     const svg = document.querySelector("#careerTrendStage svg.career-trend");
+    const calendar = document.querySelector("#careerCalendarStage svg.career-calendar");
     const actions = document.getElementById("careerTrendActions");
     return {
       days: Number(svg.dataset.days),
       start: Number(svg.dataset.start),
       actions: actions.classList.contains("on"),
       range: document.getElementById("careerTrendRange").textContent,
+      calendarDays: Number(calendar?.dataset.days || 0),
+      calendarText: document.getElementById("careerCalendarMeta")?.textContent || "",
     };
   });
 
@@ -70,9 +98,18 @@ const monthReport = path.resolve(process.argv[3] || "live_report-month.html");
   const monthly = await page.evaluate(() => ({
     xhit: document.querySelectorAll(".career-trend .x-axis-hit").length,
     reset: Boolean(document.getElementById("careerTrendReset")),
+    calendarStage: Boolean(document.getElementById("careerCalendarStage")),
   }));
 
-  const result = { avatar, before, filtered, restored, monthly };
+  const result = {
+    avatar,
+    before,
+    filtered,
+    calendarTarget,
+    calendarDriven,
+    restored,
+    monthly,
+  };
   console.log(JSON.stringify(result, null, 2));
   if (!avatar || avatar.width <= 0 || avatar.height <= 0) {
     throw new Error("Report avatar failed to load");
@@ -80,10 +117,25 @@ const monthReport = path.resolve(process.argv[3] || "live_report-month.html");
   if (!before.xhit || !filtered.actions || filtered.days >= before.days || filtered.start <= 0) {
     throw new Error("Career trend filtering failed");
   }
+  if (!before.calendarDays || before.calendarDays !== before.days) {
+    throw new Error("Career calendar initial range is not synchronized");
+  }
+  if (filtered.calendarDays !== filtered.days || !filtered.calendarText.includes("起")) {
+    throw new Error("Career calendar did not follow trend filtering");
+  }
+  if (calendarDriven.start !== calendarTarget ||
+      calendarDriven.days !== before.days - calendarTarget ||
+      calendarDriven.calendarDays !== calendarDriven.days ||
+      !calendarDriven.calendarText.includes("起")) {
+    throw new Error("Calendar click did not drive career trend");
+  }
   if (restored.actions || restored.days !== before.days || restored.start !== 0) {
     throw new Error("Career trend reset failed");
   }
-  if (monthly.xhit !== 0 || monthly.reset) {
+  if (restored.calendarDays !== before.calendarDays) {
+    throw new Error("Career calendar did not restore");
+  }
+  if (monthly.xhit !== 0 || monthly.reset || monthly.calendarStage) {
     throw new Error("Monthly report unexpectedly became interactive");
   }
   await browser.close();

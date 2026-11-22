@@ -50,6 +50,19 @@ font:inherit;font-size:13.5px;padding:8px 2px 12px;cursor:pointer}
 .scrollbox{max-height:560px;overflow:auto;border:1px solid var(--line);border-radius:10px;background:var(--card)}
 .scrollbox table{min-width:860px}
 .scrollbox thead th{position:sticky;top:0;background:var(--card2);z-index:1}
+.money-filter{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px}
+.money-filter button{border:1px solid var(--line);border-radius:999px;background:var(--card2);
+color:var(--dim);font:inherit;font-size:12px;padding:5px 12px;cursor:pointer}
+.money-filter button.on{background:linear-gradient(90deg,var(--blue),var(--pink));color:#fff;border-color:transparent}
+.money-room-filter{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:12px;margin-left:auto}
+.money-room-filter select{border:1px solid var(--line);border-radius:8px;background:var(--card2);
+color:var(--fg);padding:5px 9px;max-width:260px}
+.money-pager{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:10px;flex-wrap:wrap}
+.money-pager button{border:1px solid var(--line);border-radius:8px;background:var(--card2);
+color:var(--fg);font:inherit;font-size:12px;padding:6px 12px;cursor:pointer}
+.money-pager button:disabled{opacity:.35;cursor:default}
+.money-pager input{width:72px;border:1px solid var(--line);border-radius:8px;background:var(--card2);
+color:var(--fg);padding:5px 7px}
 .num2{text-align:right;font-variant-numeric:tabular-nums}
 .sub{color:var(--dim);font-size:11px;font-weight:400}
 .amt{color:var(--orange);font-variant-numeric:tabular-nums;white-space:nowrap}
@@ -61,6 +74,7 @@ padding:0;display:flex;align-items:center}
 .legend button.off{opacity:.35;text-decoration:line-through}
 .trend-panel .head{margin-bottom:8px}
 .career-trend .x-axis-hit{cursor:pointer}
+.career-calendar .cell{cursor:pointer}
 .trend-actions{display:none;align-items:center;justify-content:space-between;gap:14px;
 margin-top:4px;min-height:34px}
 .trend-actions.on{display:flex}
@@ -247,10 +261,31 @@ def career_trend_script(xs, danmu, other, paid):
         "+'</g><g class=\"s-other\">'+obars+'</g>'+labels+'<polyline class=\"s-paid\" points=\"'"
         "+pts.join(' ')+'\" fill=\"none\" stroke=\"#f59e0b\" stroke-width=\"2\"/><g class=\"hovers\">'"
         "+hov+'</g>'+xhit+'</svg>';}",
+        "function calendarDay(iso){var p=iso.split('-');return Date.UTC(+p[0],+p[1]-1,+p[2]);}",
+        "function calendarIso(ms){var d=new Date(ms);return d.getUTCFullYear()+'-'+String(d.getUTCMonth()+1).padStart(2,'0')+'-'+String(d.getUTCDate()).padStart(2,'0');}",
+        "function careerCalendarSvg(start){",
+        "var dates=careerTrendData.dates.slice(start),dm=careerTrendData.danmu.slice(start),ot=careerTrendData.other.slice(start);",
+        "if(!dates.length)return '<div class=\"note\">暂无数据</div>';",
+        "var counts=dates.map(function(_,i){return dm[i]+ot[i];}),mx=1;",
+        "for(var i=0;i<counts.length;i++)mx=Math.max(mx,counts[i]);",
+        "var first=calendarDay(dates[0]),last=calendarDay(dates[dates.length-1]),dow=(new Date(first).getUTCDay()+6)%7,gridStart=first-dow*86400000,weeks=Math.floor((last-gridStart)/86400000/7)+1;",
+        "var cw=15,ch=15,W=34+weeks*cw,H=22+7*ch,cells='',labels='',labelled={};",
+        "for(var w=0;w<weeks;w++){for(var k=0;k<7;k++){var ms=gridStart+(w*7+k)*86400000;if(ms<first||ms>last)continue;",
+        "var idx=Math.round((ms-first)/86400000),n=counts[idx],fill=n?'rgba(45,212,191,'+(0.20+0.80*(n/mx)).toFixed(2)+')':'rgba(255,255,255,.075)';",
+        "cells+='<rect class=\"cell\" x=\"'+(34+w*cw)+'\" y=\"'+(20+k*ch)+'\" width=\"'+(cw-4)+'\" height=\"'+(ch-4)+'\" rx=\"3\" fill=\"'+fill+'\" data-calendar-index=\"'+(start+idx)+'\" data-tip=\"'+calendarIso(ms)+' · '+n+' 次 · 点击设为趋势起点\"></rect>';}}",
+        "for(var w=0;w<weeks;w++){for(var k=0;k<7;k++){var ms=gridStart+(w*7+k)*86400000;if(ms<first||ms>last)continue;var d=new Date(ms),key=d.getUTCFullYear()+'-'+d.getUTCMonth();",
+        "if(!labelled[key]&&d.getUTCDate()<=7){labelled[key]=1;labels+='<text x=\"'+(34+w*cw)+'\" y=\"13\" fill=\"#8b949e\" font-size=\"10\">'+(d.getUTCMonth()+1)+'月</text>';break;}}}",
+        "return '<svg class=\"cal career-calendar\" viewBox=\"0 0 '+W+' '+H+'\" width=\"100%\" height=\"'+H+'\" data-days=\"'+dates.length+'\">'+cells+labels+'</svg>';}",
         "function renderCareerTrend(start){",
         "var stage=document.getElementById('careerTrendStage');if(!stage)return;",
         "careerTrendStart=Math.max(0,Math.min(start,careerTrendData.dates.length-1));",
         "stage.innerHTML=careerTrendSvg(careerTrendStart);",
+        "var calendarStage=document.getElementById('careerCalendarStage');",
+        "if(calendarStage)calendarStage.innerHTML=careerCalendarSvg(careerTrendStart);",
+        "var calendarMeta=document.getElementById('careerCalendarMeta');",
+        "if(calendarMeta){var days=careerTrendData.dates.length-careerTrendStart,active=0;",
+        "for(var i=careerTrendStart;i<careerTrendData.dates.length;i++)if(careerTrendData.danmu[i]+careerTrendData.other[i]>0)active++;",
+        "calendarMeta.textContent=(careerTrendStart>0?careerTrendData.dates[careerTrendStart]+' 起 · ':'')+days+' 天 · '+active+' 个活跃日';}",
         "document.getElementById('careerTrendActions').classList.toggle('on',careerTrendStart>0);",
         "document.getElementById('careerTrendRange').textContent=careerTrendStart>0?"
         "'当前显示 '+careerTrendData.dates[careerTrendStart]+' 起，共 '"
@@ -355,6 +390,9 @@ def money_panel(events, room_names):
     gift = sum(e.get("_yuan") or 0.0 for e in paid if e["cmd"] == "SEND_GIFT")
     guard = sum(e.get("_yuan") or 0.0 for e in paid if e["cmd"] == "GUARD_BUY")
     sc = sum(e.get("_yuan") or 0.0 for e in paid if e["cmd"] == "SUPER_CHAT_MESSAGE")
+    gift_count = sum(1 for e in paid if e["cmd"] == "SEND_GIFT")
+    guard_count = sum(1 for e in paid if e["cmd"] == "GUARD_BUY")
+    sc_count = sum(1 for e in paid if e["cmd"] == "SUPER_CHAT_MESSAGE")
     rooms = {e.get("room") for e in paid}
     biggest = max([e.get("_yuan") or 0.0 for e in paid], default=0.0)
     out = [
@@ -362,9 +400,9 @@ def money_panel(events, room_names):
         "<div class='t'>打米记录</div></div><div class='s'>免费礼物不计入消费金额</div></div>",
         "<div class='grid'>",
         card("打米总额", "%.2f" % total, "元", "共 %d 笔付费记录" % len(paid), "money"),
-        card("礼物", "%.2f" % gift, "元", "%d 笔" % sum(1 for e in paid if e["cmd"] == "SEND_GIFT"), "plain"),
-        card("上舰", "%.2f" % guard, "元", "%d 次" % sum(1 for e in paid if e["cmd"] == "GUARD_BUY"), "plain"),
-        card("醒目留言", "%.2f" % sc, "元", "%d 条" % sum(1 for e in paid if e["cmd"] == "SUPER_CHAT_MESSAGE"), "plain"),
+        card("礼物", "%.2f" % gift, "元", "%d 笔" % gift_count, "plain"),
+        card("上舰", "%.2f" % guard, "元", "%d 次" % guard_count, "plain"),
+        card("醒目留言", "%.2f" % sc, "元", "%d 条" % sc_count, "plain"),
         card("涉及频道", len(rooms), "个", "平均单笔 ¥%.2f" % (total / max(1, len(paid))), "plain"),
         card("最大单笔", "%.2f" % biggest, "元", "单条记录金额", "plain"),
         "</div></div>",
@@ -387,24 +425,47 @@ def money_panel(events, room_names):
                % compose([r for r in kinds if r[1] > 0], "¥%.1f"))
     out.append("</div>")
     rows = []
+    room_counts = Counter(e.get("room") for e in paid)
+    room_options = []
+    for rid, count in sorted(
+            room_counts.items(),
+            key=lambda item: (-item[1], room_names.get(item[0], str(item[0])))):
+        room_options.append("<option value='%s'>%s（%d 笔）</option>" % (
+            rid, esc(room_names.get(rid, "房间 %s" % rid)), count))
     for e in sorted(paid, key=lambda x: x.get("ts") or 0, reverse=True):
         rid = e.get("room")
         name = room_names.get(rid, "房间 %s" % rid)
         if e["cmd"] == "SEND_GIFT":
-            kind, content = "礼物", "%s ×%s" % (e.get("gift") or "礼物", e.get("num") or 1)
+            kind_key, kind, content = "gift", "礼物", "%s ×%s" % (e.get("gift") or "礼物", e.get("num") or 1)
         elif e["cmd"] == "GUARD_BUY":
-            kind, content = "上舰", "%s ×%s" % (e.get("guard") or "舰长", e.get("num") or 1)
+            kind_key, kind, content = "guard", "上舰", "%s ×%s" % (e.get("guard") or "舰长", e.get("num") or 1)
         else:
-            kind, content = "醒目留言", short(e.get("text") or "", 36)
-        rows.append("<tr><td>%s</td><td><div class='ch'>%s</div><div class='sub'>%s</div></td>"
+            kind_key, kind, content = "sc", "醒目留言", short(e.get("text") or "", 36)
+        rows.append("<tr class='money-row' data-money-kind='%s' data-money-room='%s'><td>%s</td>"
+                    "<td><div class='ch'>%s</div><div class='sub'>%s</div></td>"
                     "<td>%s</td><td>%s</td><td class='num2 amt'>¥%.2f</td></tr>"
-                    % (fmt_dt(e.get("ts")), esc(name), esc(e.get("area") or ""),
+                    % (kind_key, rid, fmt_dt(e.get("ts")), esc(name), esc(e.get("area") or ""),
                        esc(kind), esc(content), e.get("_yuan") or 0.0))
-    out.append("<div class='panel'><div class='head'><div class='t'>明细</div>"
-               "<div class='s'>按时间倒序 · %d 笔</div></div><div class='scrollbox'><table>"
+    out.append("<div class='panel' id='moneyDetail'><div class='head'><div class='t'>付费明细</div>"
+               "<div class='s'>按时间倒序 · 每页 100 条 · %d 笔</div></div>"
+               "<div class='money-filter' id='moneyFilter'>"
+               "<button class='on' data-money-kind='all'>全部</button>"
+               "<button data-money-kind='gift'>礼物 %d</button>"
+               "<button data-money-kind='guard'>上舰 %d</button>"
+               "<button data-money-kind='sc'>醒目留言 %d</button>"
+               "<label class='money-room-filter'>直播间 "
+               "<select id='moneyRoom'><option value='all'>全部直播间</option>%s</select>"
+               "</label></div>"
+               "<div class='scrollbox'><table>"
                "<thead><tr><th>时间</th><th>频道</th><th>类型</th><th>内容</th>"
-               "<th class='num2'>金额</th></tr></thead><tbody>%s</tbody></table></div></div>"
-               % (len(rows), "".join(rows)))
+               "<th class='num2'>金额</th></tr></thead><tbody id='moneyRows'>%s</tbody></table></div>"
+               "<div class='money-pager'><button id='moneyPrev' type='button'>上一页</button>"
+               "<span id='moneyPageInfo' class='sub'>第 1 / 1 页</span>"
+               "<input id='moneyJump' type='number' min='1' value='1' aria-label='跳转页码'>"
+               "<button id='moneyGo' type='button'>跳转</button>"
+               "<button id='moneyNext' type='button'>下一页</button></div></div>"
+               % (len(rows), gift_count, guard_count, sc_count,
+                  "".join(room_options), "".join(rows)))
     return "".join(out)
 
 
@@ -792,8 +853,15 @@ def render_period(events, account, room_names, my_uid, period="career",
                     if interactive_trend else [])
     trend_actions = ""
     trend_stage_attr = ""
+    calendar_stage_attr = ""
+    calendar_meta_attr = ""
+    calendar_active_count = len(days)
     if interactive_trend:
         trend_stage_attr = " id='careerTrendStage'"
+        calendar_stage_attr = " id='careerCalendarStage'"
+        calendar_meta_attr = " id='careerCalendarMeta'"
+        calendar_active_count = sum(
+            1 for danmu_n, other_n in zip(dm, ot) if danmu_n + other_n > 0)
         trend_actions = (
             "<div class='trend-actions' id='careerTrendActions'>"
             "<span class='trend-range' id='careerTrendRange'></span>"
@@ -880,7 +948,9 @@ def render_period(events, account, room_names, my_uid, period="career",
         trend_panel,
         "<div class='two'>",
         "<div class='panel'><div class='head'><div class='t'>活跃日历</div>"
-        "<div class='s'>%d 个活跃日</div></div>%s</div>" % (len(days), svg_calendar(events)),
+        "<div class='s'%s>%d 天 · %d 个活跃日</div></div><div%s>%s</div></div>"
+        % (calendar_meta_attr, span, calendar_active_count,
+           calendar_stage_attr, svg_calendar(events)),
         "<div class='panel'><div class='head'><div class='t'>星期与时段</div>"
         "<div class='s'>按互动次数</div></div>%s</div>" % svg_week_hours(events),
         "</div>",
@@ -912,6 +982,29 @@ def render_period(events, account, room_names, my_uid, period="career",
         "btns.forEach(function(b){b.addEventListener('click',function(){showPane(b.dataset.tab)})});",
         "var h=(location.hash||'').replace('#','');",
         "if(['activity','money','channels'].indexOf(h)>=0){showPane(h)}",
+        "(function(){",
+        "var rows=Array.from(document.querySelectorAll('#moneyRows .money-row'));",
+        "if(!rows.length)return;",
+        "var kind='all',room='all',page=1,pageSize=100;",
+        "function filtered(){return rows.filter(function(r){return (kind==='all'||r.dataset.moneyKind===kind)&&(room==='all'||r.dataset.moneyRoom===room);});}",
+        "function render(){var list=filtered(),pages=Math.max(1,Math.ceil(list.length/pageSize));",
+        "page=Math.max(1,Math.min(page,pages));rows.forEach(function(r){r.style.display='none';});",
+        "list.slice((page-1)*pageSize,page*pageSize).forEach(function(r){r.style.display='table-row';});",
+        "document.getElementById('moneyPageInfo').textContent='第 '+page+' / '+pages+' 页 · '+list.length+' 条';",
+        "document.getElementById('moneyPrev').disabled=page<=1;",
+        "document.getElementById('moneyNext').disabled=page>=pages;",
+        "document.getElementById('moneyJump').max=pages;",
+        "document.getElementById('moneyJump').value=page;}",
+        "document.querySelectorAll('#moneyFilter button').forEach(function(b){b.addEventListener('click',function(){",
+        "document.querySelectorAll('#moneyFilter button').forEach(function(x){x.classList.remove('on');});",
+        "b.classList.add('on');kind=b.dataset.moneyKind;page=1;render();});});",
+        "document.getElementById('moneyRoom').addEventListener('change',function(){room=this.value;page=1;render();});",
+        "document.getElementById('moneyPrev').addEventListener('click',function(){page--;render();});",
+        "document.getElementById('moneyNext').addEventListener('click',function(){page++;render();});",
+        "document.getElementById('moneyGo').addEventListener('click',function(){page=Number(document.getElementById('moneyJump').value)||1;render();});",
+        "document.getElementById('moneyJump').addEventListener('keydown',function(e){if(e.key==='Enter'){page=Number(this.value)||1;render();}});",
+        "render();",
+        "})();",
         "var tip=document.getElementById('tip');",
         "function tipEl(e){return e.target.closest?e.target.closest('[data-tip]'):null;}",
         "document.addEventListener('mouseover',function(e){var t=tipEl(e);",
@@ -936,6 +1029,11 @@ def render_period(events, account, room_names, my_uid, period="career",
         "offset=parseInt(svg.getAttribute('data-start'),10)||0;",
         "var local=Math.max(0,Math.min(n-1,Math.floor((x-44)/(984/Math.max(1,n)))));",
         "renderCareerTrend(offset+local);});",
+        "document.addEventListener('click',function(e){",
+        "var cell=e.target.closest?e.target.closest('[data-calendar-index]'):null;",
+        "if(!cell)return;var index=parseInt(cell.getAttribute('data-calendar-index'),10);",
+        "if(Number.isFinite(index))renderCareerTrend(index);});",
+        "if(document.getElementById('careerTrendStage'))renderCareerTrend(0);",
         "</script>",
         "</div></body></html>",
     ]

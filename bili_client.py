@@ -1867,8 +1867,9 @@ def run_gui():
                     ensure_console_service()
                 generate_report()
                 return ("danmakus同步完成：匹配 %d 条，本次新增 %d 条，"
-                        "当前补充集 %d 条；报告正在生成。" %
+                        "校正上舰价格 %d 条，当前补充集 %d 条；报告正在生成。" %
                         (audit["matched"], audit["remote_only_added"],
+                         audit["guard_price_corrections_added"],
                          audit["supplement_total"]))
             except sync.DailySyncLimitExceeded:
                 root.after(0, lambda: messagebox.showwarning(
@@ -2032,6 +2033,30 @@ def run_gui():
             try:
                 import bili_live as live
                 event = live.append_manual_event(payload)
+            except live.PossibleDuplicateError as exc:
+                labels = {
+                    "live": "本地实时", "backfill": "回补",
+                    "danmakus": "danmakus", "manual": "手动补录",
+                }
+                rows = []
+                for item in exc.candidates[:3]:
+                    happened = time.strftime(
+                        "%Y-%m-%d %H:%M:%S",
+                        time.localtime(int(item.get("ts") or 0) / 1000))
+                    rows.append("%s｜%s｜%s 个月/个｜¥%.2f" % (
+                        happened, labels.get(item.get("src"), item.get("src")),
+                        item.get("num") or 1, float(item.get("amount") or 0)))
+                if not messagebox.askyesno(
+                        "疑似重复补录",
+                        "已有高度相似的记录：\n\n%s\n\n仍然保存这条补录吗？"
+                        % "\n".join(rows), parent=dlg):
+                    return
+                try:
+                    event = live.append_manual_event(
+                        payload, confirm_duplicate=True)
+                except Exception as exc:
+                    messagebox.showerror("补录失败", str(exc), parent=dlg)
+                    return
             except Exception as exc:
                 messagebox.showerror("补录失败", str(exc), parent=dlg)
                 return

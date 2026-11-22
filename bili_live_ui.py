@@ -135,7 +135,9 @@ def run_quiet(args, timeout=15):
 
 def events_cached():
     """合并【实时采集 + 历史导入】两份数据；文件变动时才重新解析。"""
-    paths = [L.HISTORY_FILE, L.DANMAKUS_V3_FILE, L.EVENTS_FILE]
+    paths = [
+        L.HISTORY_FILE, L.DANMAKUS_V3_FILE,
+        L.DANMAKUS_V3_PRICE_FIX_FILE, L.EVENTS_FILE]
     key = []
     for p in paths:
         try:
@@ -344,7 +346,7 @@ def event_item(e, names):
     }
 
 
-def events_payload(kind="all", limit=200):
+def events_payload(kind="all", limit=100, offset=0):
     """按分类返回明细；kind 可选 all/danmu/gift/sc/guard/enter/manual。"""
     rooms = load_rooms()
     names = known_room_names(rooms)
@@ -359,8 +361,23 @@ def events_payload(kind="all", limit=200):
     }
     sel = [e for e in events if rules.get(kind, lambda x: True)(e)]
     sel.sort(key=lambda e: -(e.get("ts") or 0))
-    return {"total": len(sel), "kind": kind,
-            "items": [event_item(e, names) for e in sel[:limit]]}
+    total = len(sel)
+    limit = max(1, min(2000, int(limit or 100)))
+    offset = max(0, int(offset or 0))
+    pages = max(1, (total + limit - 1) // limit)
+    page = min(pages, offset // limit + 1)
+    offset = (page - 1) * limit
+    return {
+        "total": total,
+        "kind": kind,
+        "offset": offset,
+        "limit": limit,
+        "page": page,
+        "pages": pages,
+        "has_prev": page > 1,
+        "has_next": page < pages,
+        "items": [event_item(e, names) for e in sel[offset:offset + limit]],
+    }
 
 
 def build_state():
@@ -502,6 +519,9 @@ table{border-collapse:collapse;width:100%;font-size:12.5px}
 th,td{padding:7px 9px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
 th{color:var(--dim);font-weight:500}
 .wrap{max-height:420px;overflow:auto;border:1px solid var(--line);border-radius:10px}
+.pager{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:10px;flex-wrap:wrap}
+.pager input{width:72px;background:#11161e;color:var(--fg);border:1px solid var(--line);
+border-radius:8px;padding:6px 8px}
 .bars{display:flex;align-items:flex-end;gap:3px;height:90px}
 .bars div{flex:1;background:linear-gradient(180deg,var(--pink),var(--blue));border-radius:3px 3px 0 0;min-height:2px}
 .row{display:grid;grid-template-columns:190px 1fr 54px;gap:10px;align-items:center;margin:5px 0}
@@ -551,6 +571,13 @@ box-shadow:0 8px 22px rgba(0,0,0,.4)}
       <button class="chip" data-kind="manual">手动补录</button>
     </div>
     <div class="wrap"><table id="recent"></table></div>
+    <div class="pager">
+      <button id="recentPrev">上一页</button>
+      <span class="muted" id="recentPageInfo">第 1 / 1 页</span>
+      <input id="recentJump" type="number" min="1" value="1" aria-label="跳转页码">
+      <button id="recentGo">跳转</button>
+      <button id="recentNext">下一页</button>
+    </div>
   </div>
   <h2>数据来源对照（查漏记）</h2>
   <div class="panel" id="src"></div>
@@ -570,11 +597,20 @@ box-shadow:0 8px 22px rgba(0,0,0,.4)}
 <script>
 const $=s=>document.querySelector(s);
 const API_TOKEN=new URLSearchParams(location.search).get('token')||'';
-let recentKind='all', lastCount=-1;
+let recentKind='all', lastCount=-1, recentPage=1, recentPages=1;
+const RECENT_PAGE_SIZE=100;
 async function loadRecent(){
-  const d=await api('/api/events?kind='+recentKind+'&limit=200');
+  const offset=(recentPage-1)*RECENT_PAGE_SIZE;
+  const d=await api('/api/events?kind='+encodeURIComponent(recentKind)+
+    '&limit='+RECENT_PAGE_SIZE+'&offset='+offset);
+  recentPage=d.page; recentPages=d.pages;
   const label={danmu:'弹幕',gift:'礼物',sc:'醒目留言',guard:'上舰',enter:'进入',manual:'手动补录'}[recentKind]||'全部';
-  $('#recentCount').textContent=`${label} · 共 ${d.total} 条`;
+  $('#recentCount').textContent=`${label} · 共 ${d.total} 条 · 每页 ${d.limit} 条`;
+  $('#recentPageInfo').textContent=`第 ${d.page} / ${d.pages} 页`;
+  $('#recentPrev').disabled=!d.has_prev;
+  $('#recentNext').disabled=!d.has_next;
+  $('#recentJump').value=d.page;
+  $('#recentJump').max=d.pages;
   $('#recent').innerHTML='<thead><tr><th>时间</th><th>直播间</th><th>类型</th><th>内容</th><th class="num">金额</th><th>来源</th></tr></thead><tbody>'+
     (d.items.map(e=>`<tr><td>${e.time}</td><td>${esc(e.room)}</td><td>${e.kind}</td>`+
      `<td>${esc(e.text)||'—'}${e.extra?' '+esc(e.extra):''}</td>`+
@@ -582,9 +618,20 @@ async function loadRecent(){
      `<td class="muted">${e.src==='manual'?'手动':e.src==='backfill'?'回补':e.src==='danmakus'?'导入':'实时'}</td></tr>`).join('')||
      '<tr><td colspan="6" class="muted">该分类暂无记录</td></tr>')+'</tbody>';
 }
+function gotoRecentPage(page){
+  const target=Math.max(1,Math.min(recentPages,Number(page)||1));
+  if(target===recentPage)return;
+  recentPage=target; loadRecent();
+}
 document.querySelectorAll('#recentFilter .chip').forEach(b=>{
   b.onclick=()=>{document.querySelectorAll('#recentFilter .chip').forEach(x=>x.classList.remove('on'));
-    b.classList.add('on'); recentKind=b.dataset.kind; loadRecent();};
+    b.classList.add('on'); recentKind=b.dataset.kind; recentPage=1; loadRecent();};
+});
+$('#recentPrev').onclick=()=>gotoRecentPage(recentPage-1);
+$('#recentNext').onclick=()=>gotoRecentPage(recentPage+1);
+$('#recentGo').onclick=()=>gotoRecentPage($('#recentJump').value);
+$('#recentJump').addEventListener('keydown',e=>{
+  if(e.key==='Enter')gotoRecentPage($('#recentJump').value);
 });
 async function api(path,opt={}){const headers=new Headers(opt.headers||{});
   headers.set('X-DD-Token',API_TOKEN);
@@ -686,10 +733,15 @@ class Handler(BaseHTTPRequestHandler):
             q = parse_qs(urlparse(self.path).query)
             kind = (q.get("kind") or ["all"])[0]
             try:
-                limit = max(1, min(2000, int((q.get("limit") or ["200"])[0])))
+                limit = max(1, min(2000, int((q.get("limit") or ["100"])[0])))
             except ValueError:
-                limit = 200
-            return self._send(200, json.dumps(events_payload(kind, limit), ensure_ascii=False))
+                limit = 100
+            try:
+                offset = max(0, int((q.get("offset") or ["0"])[0]))
+            except ValueError:
+                offset = 0
+            return self._send(200, json.dumps(
+                events_payload(kind, limit, offset), ensure_ascii=False))
         return self._send(404, json.dumps({"error": "not found"}))
 
     def do_POST(self):
@@ -704,7 +756,10 @@ class Handler(BaseHTTPRequestHandler):
         result = {"ok": True}
         try:
             if path == "/api/manual":
-                event = L.append_manual_event(payload)
+                confirmed = payload.get("confirm_duplicate") in (
+                    True, 1, "1", "true", "yes")
+                event = L.append_manual_event(
+                    payload, confirm_duplicate=confirmed)
                 result.update(event=event, msg="手动补录已保存")
             elif path == "/api/collector":
                 result["msg"] = collector_start() if payload.get("action") == "start" else collector_stop()
@@ -729,6 +784,13 @@ class Handler(BaseHTTPRequestHandler):
                 result["msg"] = "正在后台发现，稍后刷新"
             else:
                 return self._send(404, json.dumps({"error": "not found"}))
+        except L.PossibleDuplicateError as exc:
+            return self._send(409, json.dumps({
+                "ok": False,
+                "code": "possible_duplicate",
+                "msg": str(exc),
+                "candidates": exc.candidates,
+            }, ensure_ascii=False))
         except Exception as exc:
             result = {"ok": False, "msg": str(exc)}
         return self._send(200, json.dumps(result, ensure_ascii=False))

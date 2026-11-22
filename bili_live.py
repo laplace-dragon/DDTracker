@@ -100,14 +100,18 @@ def resolve_data_dir(value=None):
 DATA_DIR = resolve_data_dir()
 EVENTS_FILE = os.path.join(DATA_DIR, "live_events.jsonl")
 DANMAKUS_V3_FILE = os.path.join(DATA_DIR, "danmakus_v3_events.jsonl")
+DANMAKUS_V3_PRICE_FIX_FILE = os.path.join(
+    DATA_DIR, "danmakus_v3_guard_price_fixes.jsonl")
 
 
 def configure_data_paths(value=None):
     """重新解析采集数据目录，供客户端切换路径后立即使用。"""
-    global DATA_DIR, EVENTS_FILE, DANMAKUS_V3_FILE
+    global DATA_DIR, EVENTS_FILE, DANMAKUS_V3_FILE, DANMAKUS_V3_PRICE_FIX_FILE
     DATA_DIR = resolve_data_dir(value)
     EVENTS_FILE = os.path.join(DATA_DIR, "live_events.jsonl")
     DANMAKUS_V3_FILE = os.path.join(DATA_DIR, "danmakus_v3_events.jsonl")
+    DANMAKUS_V3_PRICE_FIX_FILE = os.path.join(
+        DATA_DIR, "danmakus_v3_guard_price_fixes.jsonl")
     return EVENTS_FILE
 
 if sys.stdout is None:  # pythonw.exe 无控制台时兜底
@@ -386,6 +390,9 @@ def unpack(data):
 
 def keep_event(ev, mid):
     """默认只保留登录用户本人的事件，别人的数据一概不落盘（--all 才保留全场）。"""
+    if ev.get("cmd") == "GIFT_POPUP":
+        # 账号级礼物广告/展示推送，不是本人互动或消费记录。
+        return False
     if _limit["all"]:
         return True
     return ev.get("uid") == mid
@@ -820,6 +827,7 @@ def dedupe_events(events):
     """跨来源去重：同一条事件可能被实时流与回补/导入各记一次，只保留一份；
     但同一来源内的重复记录是真实发生的（例如同分钟送两次同样的礼物），必须保留。
     例外：账号级通知（personal）是广播到所有连接的副本，10 秒内同内容只算一条。"""
+    events = [event for event in events if event.get("cmd") != "GIFT_POPUP"]
     events = _apply_local_guard_toast_prices(events)
     events = _collapse_exact(events)
     events = _collapse_sc(events)
@@ -1015,7 +1023,69 @@ def _manual_amount(value, default=0.0):
     return round(amount, 3)
 
 
-def append_manual_event(payload):
+class PossibleDuplicateError(ValueError):
+    """手动补录与已有记录高度相似，需要用户确认。"""
+
+    def __init__(self, candidates):
+        self.candidates = candidates
+        super().__init__("发现疑似重复记录，请确认后再保存。")
+
+
+def _event_body(event):
+    return " ".join(str(
+        event.get("text") or event.get("gift") or event.get("guard")
+        or event.get("interact") or "").split())
+
+
+def find_manual_duplicates(candidate, events=None):
+    """返回与待补录事件高度相似的已有记录，不自动删除或合并。"""
+    if events is None:
+        events = dedupe_events(load_events())
+    try:
+        candidate_uid = int(candidate.get("uid") or 0)
+    except (TypeError, ValueError):
+        candidate_uid = 0
+    cmd = str(candidate.get("cmd") or "")
+    body = _event_body(candidate)
+    amount = round(yuan_of(candidate), 2)
+    stamp = int(candidate.get("ts") or 0)
+    matches = []
+    for event in events:
+        if event.get("cmd") != cmd or event.get("room") != candidate.get("room"):
+            continue
+        try:
+            event_uid = int(event.get("uid") or 0)
+        except (TypeError, ValueError):
+            event_uid = 0
+        if candidate_uid and event_uid and candidate_uid != event_uid:
+            continue
+        if _event_body(event) != body:
+            continue
+        if abs(round(yuan_of(event), 2) - amount) > 0.01:
+            continue
+        estimated = bool(candidate.get("estimated") or event.get("estimated"))
+        if cmd == "GUARD_BUY":
+            tolerance = 30 * 60 * 1000 if estimated else 2 * 60 * 1000
+        elif cmd in ("SEND_GIFT", "SUPER_CHAT_MESSAGE"):
+            tolerance = 30 * 60 * 1000 if estimated else 2 * 60 * 1000
+        else:
+            tolerance = 30 * 60 * 1000 if estimated else 10 * 1000
+        diff = abs(int(event.get("ts") or 0) - stamp)
+        if diff > tolerance:
+            continue
+        matches.append({
+            "ts": event.get("ts"),
+            "src": event.get("src") or "live",
+            "num": event.get("num"),
+            "amount": round(yuan_of(event), 2),
+            "note": event.get("note") or "",
+            "diff_ms": diff,
+        })
+    matches.sort(key=lambda item: item["diff_ms"])
+    return matches[:10]
+
+
+def append_manual_event(payload, confirm_duplicate=False):
     """校验并追加一条本人手动补录，供客户端和本地 HTTP API 共用。"""
     if not isinstance(payload, dict):
         raise ValueError("补录内容必须是 JSON 对象")
@@ -1102,6 +1172,11 @@ def append_manual_event(payload):
     else:
         ev.update(cmd="INTERACT_WORD", interact=content)
 
+    if not confirm_duplicate:
+        duplicates = find_manual_duplicates(ev)
+        if duplicates:
+            raise PossibleDuplicateError(duplicates)
+
     line = json.dumps(ev, ensure_ascii=False) + "\n"
     with _manual_append_lock:
         with open(EVENTS_FILE, "a", encoding="utf-8", buffering=1) as fh:
@@ -1125,6 +1200,7 @@ def manual_schema():
             "amount": "金额（元），物品按总额填写",
             "quantity": "数量，默认 1",
             "note": "补录备注",
+            "confirm_duplicate": "发现疑似重复后，确认仍要保存时传 true",
         },
         "example": {
             "time": "2026-11-05 20:30:00",
@@ -1484,7 +1560,7 @@ def load_events():
     events = []
     import glob
     base = EVENTS_FILE[:-6] if EVENTS_FILE.endswith(".jsonl") else EVENTS_FILE
-    paths = [HISTORY_FILE, DANMAKUS_V3_FILE]
+    paths = [HISTORY_FILE, DANMAKUS_V3_FILE, DANMAKUS_V3_PRICE_FIX_FILE]
     paths += sorted(glob.glob("%s.jsonl" % base)) + sorted(glob.glob("%s.*.jsonl" % base))
     for path in paths:
         if not os.path.isfile(path):
@@ -1495,7 +1571,9 @@ def load_events():
                 if not line:
                     continue
                 try:
-                    events.append(json.loads(line))
+                    event = json.loads(line)
+                    if event.get("cmd") != "GIFT_POPUP":
+                        events.append(event)
                 except Exception:
                     continue
     return events

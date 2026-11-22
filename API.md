@@ -12,6 +12,24 @@ X-DD-Token: <console.token 内容>
 
 无令牌或令牌不匹配时返回 HTTP 403。服务退出时会删除 `console.token`。
 
+## 分页查看事件
+
+```http
+GET /api/events?kind=all&limit=100&offset=0
+X-DD-Token: <console.token 内容>
+```
+
+参数：
+
+| 参数 | 说明 |
+|---|---|
+| `kind` | `all` / `danmu` / `gift` / `sc` / `guard` / `enter` / `manual` |
+| `limit` | 每页数量，默认 `100`，最大 `2000` |
+| `offset` | 从第几条开始，默认 `0` |
+
+响应包含 `total`、`page`、`pages`、`has_prev`、`has_next` 和当前页 `items`。
+客户端页面固定每页 100 条。
+
 ## 查看手动补录格式
 
 ```http
@@ -48,6 +66,7 @@ X-DD-Token: <console.token 内容>
 | `quantity` | 否 | 数量，默认 `1` |
 | `estimated` | 否 | 时间或金额为估算时填 `1` |
 | `note` | 否 | 补录备注 |
+| `confirm_duplicate` | 否 | 确认疑似重复后仍要保存时填 `true` |
 
 礼物示例：
 
@@ -132,5 +151,27 @@ Invoke-RestMethod `
   }
 }
 ```
+
+发现疑似重复时返回 HTTP 409，并且不会写入记录：
+
+```json
+{
+  "ok": false,
+  "code": "possible_duplicate",
+  "msg": "发现疑似重复记录，请确认后再保存。",
+  "candidates": [
+    {
+      "ts": 1793881800000,
+      "src": "danmakus",
+      "num": 2,
+      "amount": 276.0,
+      "note": "",
+      "diff_ms": 60000
+    }
+  ]
+}
+```
+
+确认确实是另一笔后，在原请求体中增加 `"confirm_duplicate": true` 再提交。
 
 所有补录固定写入当前登录的本人账号，不能通过接口指定其他 UID。每条补录都有唯一 `manual_id`，同一秒内的相同记录也不会互相覆盖。

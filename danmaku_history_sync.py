@@ -21,6 +21,8 @@ API_BASE = "https://api.ukamnads.icu/api/v3/users/%d/history"
 SNAPSHOT_FILE = os.path.join(L.DATA_DIR, "danmakus_v3_snapshot.json")
 AUDIT_FILE = os.path.join(L.DATA_DIR, "danmakus_v3_sync_audit.json")
 REMOTE_EVENTS_FILE = os.path.join(L.DATA_DIR, "danmakus_v3_remote_events.jsonl")
+PRICE_FIX_FILE = os.path.join(
+    L.DATA_DIR, "danmakus_v3_guard_price_fixes.jsonl")
 STATE_FILE = os.path.join(L.DATA_DIR, "danmakus_v3_sync_state.json")
 PAGE_SIZE = 20
 INCREMENTAL_LOOKBACK_MS = 24 * 60 * 60 * 1000
@@ -448,6 +450,33 @@ def _conflict_key(event):
     return (int(event.get("room") or 0), cmd, content, quantity)
 
 
+def _price_fix_key(event):
+    remote_key = event.get("remote_key")
+    if remote_key:
+        return "remote:%s" % remote_key
+    return "%s|%s|%s|%s|%s" % (
+        event.get("room"), event.get("uid"), event.get("guard"),
+        int(event.get("num") or 1), int(event.get("ts") or 0))
+
+
+def _merge_guard_price_fixes(existing, incoming):
+    """合并价格校正，返回（排序后的列表，新增或变更数量）。"""
+    by_key = {_price_fix_key(event): event for event in existing}
+    changed = set()
+    for event in incoming:
+        key = _price_fix_key(event)
+        fixed = dict(event)
+        fixed["price_fix"] = 1
+        previous = by_key.get(key)
+        if (previous is None
+                or round(L.yuan_of(previous), 2)
+                != round(L.yuan_of(fixed), 2)):
+            changed.add(key)
+        by_key[key] = fixed
+    merged = sorted(by_key.values(), key=lambda event: event.get("ts") or 0)
+    return merged, len(changed)
+
+
 def _tolerance_ms(event):
     if _semantic(event)[0] == "ENTRY":
         return 90 * 1000
@@ -469,11 +498,11 @@ def compare(local_events, remote_events):
         values.sort()
 
     used = set()
-    remote_only, matched = [], 0
+    remote_only, matched, price_corrections = [], 0, []
     for event in sorted(remote_events, key=lambda x: x.get("ts") or 0):
         candidates = buckets.get(_match_key(event), [])
         stamp = int(event.get("ts") or 0)
-        best, best_diff = None, None
+        best, best_diff, matched_by_price_conflict = None, None, False
         for local_stamp, index in candidates:
             if index in used:
                 continue
@@ -494,14 +523,20 @@ def compare(local_events, remote_events):
                 diff = abs(local_stamp - stamp)
                 if diff <= tolerance and (best_diff is None or diff < best_diff):
                     best, best_diff = index, diff
+                    matched_by_price_conflict = True
         if best is None:
             remote_only.append(event)
         else:
             used.add(best)
             matched += 1
+            local_event = local_events[best]
+            if (matched_by_price_conflict
+                    and round(L.yuan_of(local_event), 2)
+                    != round(L.yuan_of(event), 2)):
+                price_corrections.append(event)
     local_only = [event for index, event in enumerate(local_events)
                   if index not in used]
-    return matched, remote_only, local_only
+    return matched, remote_only, local_only, price_corrections
 
 
 def _sync_history_unlocked(uid=None, progress=print, use_snapshot=False,
@@ -566,7 +601,18 @@ def _sync_history_unlocked(uid=None, progress=print, use_snapshot=False,
 
     base_events = [e for e in L.load_events() if not e.get("remote_v3")]
     local_events = L.dedupe_events(base_events)
-    matched, remote_only, local_only = compare(local_events, new_remote_events)
+    matched, remote_only, local_only, new_price_fixes = compare(
+        local_events, new_remote_events)
+    guard_events = [
+        event for event in remote_events
+        if event.get("cmd") == "GUARD_BUY"]
+    if guard_events:
+        _, _, _, historical_price_fixes = compare(local_events, guard_events)
+        new_price_fixes.extend(historical_price_fixes)
+
+    existing_price_fixes = _read_jsonl(PRICE_FIX_FILE)
+    price_fixes, added_price_fixes = _merge_guard_price_fixes(
+        existing_price_fixes, new_price_fixes)
 
     supplement = _read_jsonl(L.DANMAKUS_V3_FILE)
     supplement_by_key = {_event_key(event): event for event in supplement}
@@ -589,6 +635,7 @@ def _sync_history_unlocked(uid=None, progress=print, use_snapshot=False,
     if mode != "cached" or previous_remote_events:
         _atomic_jsonl(REMOTE_EVENTS_FILE, remote_events)
     _atomic_jsonl(L.DANMAKUS_V3_FILE, supplement)
+    _atomic_jsonl(PRICE_FIX_FILE, price_fixes)
 
     audit = {
         "fetched_at": started_at,
@@ -607,6 +654,8 @@ def _sync_history_unlocked(uid=None, progress=print, use_snapshot=False,
         "remote_only_added": len(newly_added_supplement),
         "remote_only_in_batch": len(remote_only),
         "supplement_total": len(supplement),
+        "guard_price_corrections_added": added_price_fixes,
+        "guard_price_corrections_total": len(price_fixes),
         "local_only_in_batch": len(local_only),
         "remote_only_by_type": dict(Counter(
             e.get("cmd") for e in newly_added_supplement).most_common()),
@@ -617,6 +666,7 @@ def _sync_history_unlocked(uid=None, progress=print, use_snapshot=False,
         "snapshot_file": SNAPSHOT_FILE,
         "remote_events_file": REMOTE_EVENTS_FILE,
         "supplement_file": L.DANMAKUS_V3_FILE,
+        "price_fix_file": PRICE_FIX_FILE,
         "state_file": STATE_FILE,
     }
     _atomic_json(AUDIT_FILE, audit)
@@ -630,6 +680,7 @@ def _sync_history_unlocked(uid=None, progress=print, use_snapshot=False,
             "last_remote_event_ts": last_event_ts,
             "remote_events_saved_total": len(remote_events),
             "supplement_total": len(supplement),
+            "guard_price_fixes_total": len(price_fixes),
         })
     elif not os.path.isfile(STATE_FILE) and incremental_since:
         _atomic_json(STATE_FILE, {
@@ -638,6 +689,7 @@ def _sync_history_unlocked(uid=None, progress=print, use_snapshot=False,
             "last_mode": "migrated",
             "remote_events_saved_total": len(remote_events),
             "supplement_total": len(supplement),
+            "guard_price_fixes_total": len(price_fixes),
         })
     return audit
 
@@ -667,7 +719,10 @@ def main():
     print("与本地匹配：%d" % audit["matched"])
     print("本次新增本地缺失：%d" % audit["remote_only_added"])
     print("当前补充集：%d" % audit["supplement_total"])
+    print("本次校正上舰价格：%d" % audit["guard_price_corrections_added"])
+    print("当前上舰价格校正：%d" % audit["guard_price_corrections_total"])
     print("补充文件：%s" % audit["supplement_file"])
+    print("价格校正文件：%s" % audit["price_fix_file"])
     print("校准报告：%s" % AUDIT_FILE)
     return 0
 
