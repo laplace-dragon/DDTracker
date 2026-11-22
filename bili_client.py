@@ -60,7 +60,8 @@ if not os.path.exists(PYTHONW):
     PYTHONW = sys.executable
 
 DEFAULT_SETTINGS = {
-    "follow": True, "interval": 60, "cap": 25, "rotate_mb": 64, "keep": 0,
+    "collection_mode": "auto", "manual_rooms": [],
+    "follow": True, "interval": 60, "cap": 0, "rotate_mb": 64, "keep": 0,
     "close_behavior": "tray", "minimize_behavior": "tray",
     "data_dir": DEFAULT_DATA_DIR,
 }
@@ -139,6 +140,19 @@ def load_settings():
             data.update({k: saved[k] for k in data if k in saved})
     except Exception:
         pass
+    mode = data.get("collection_mode")
+    if mode not in ("auto", "manual"):
+        mode = "auto" if data.get("follow", True) else "manual"
+    data["collection_mode"] = mode
+    data["follow"] = mode == "auto"
+    data["cap"] = 0
+    try:
+        data["manual_rooms"] = sorted({
+            int(room) for room in (data.get("manual_rooms") or [])
+            if str(room).strip().isdigit()
+        })
+    except Exception:
+        data["manual_rooms"] = []
     # 事件分片只归档不删除；旧配置中的 keep 不再允许触发清理。
     data["keep"] = 0
     return data
@@ -292,10 +306,14 @@ def clear_login_files(base_dir=None):
 
 def build_args(settings):
     args = ["collect"]
-    if settings.get("follow", True):
+    mode = settings.get("collection_mode", "auto")
+    if mode == "auto":
         args.append("--follow")
+    else:
+        selected = settings.get("manual_rooms") or []
+        args += ["--rooms", ",".join(str(int(room)) for room in selected)]
     args += ["--interval", str(int(settings.get("interval", 60))),
-             "--cap", str(int(settings.get("cap", 25))),
+             "--cap", "0",
              "--rotate-mb", str(int(settings.get("rotate_mb", 64))),
              "--keep", str(int(settings.get("keep", 0)))]
     return args
@@ -421,6 +439,9 @@ def console_ready():
 
 
 def start_collection(settings):
+    if (settings.get("collection_mode", "auto") == "manual"
+            and not settings.get("manual_rooms")):
+        return "手动采集模式尚未选择直播间。"
     save_settings(settings)
     try:
         os.remove(DISABLED_FILE)
@@ -1248,22 +1269,25 @@ def run_gui():
     tk.Frame(status_card, bg=CYAN, height=2).grid(
         row=4, column=0, columnspan=4, sticky="ew", pady=(12, 0))
 
-    follow_var = tk.BooleanVar(value=bool(settings.get("follow", True)))
     interval_var = tk.StringVar(value=str(settings.get("interval", 60)))
-    cap_var = tk.StringVar(value=str(settings.get("cap", 25)))
 
     def collect_settings():
         try:
             interval = max(30, min(600, int(interval_var.get())))
-            cap = max(1, min(100, int(cap_var.get())))
         except ValueError:
-            messagebox.showerror("输入有误", "刷新间隔和采集数量必须是数字。")
+            messagebox.showerror("输入有误", "刷新间隔必须是数字。")
             return None
         interval_var.set(str(interval))
-        cap_var.set(str(cap))
-        return {"follow": bool(follow_var.get()), "interval": interval, "cap": cap,
-                "rotate_mb": int(settings.get("rotate_mb", 64)),
-                "keep": 0}
+        current = load_settings()
+        return {
+            "collection_mode": current.get("collection_mode", "auto"),
+            "manual_rooms": current.get("manual_rooms", []),
+            "follow": current.get("collection_mode", "auto") == "auto",
+            "interval": interval,
+            "cap": 0,
+            "rotate_mb": int(settings.get("rotate_mb", 64)),
+            "keep": 0,
+        }
 
     close_options = {"隐藏到托盘": "tray", "彻底退出客户端": "exit"}
     minimize_options = {"隐藏到托盘": "tray", "最小化到任务栏": "taskbar"}
@@ -1300,9 +1324,7 @@ def run_gui():
         y = root.winfo_rooty() + max(20, (root.winfo_height() - 820) // 2)
         dlg.geometry("760x820+%d+%d" % (x, y))
 
-        d_follow = tk.BooleanVar(value=bool(settings.get("follow", True)))
         d_interval = tk.StringVar(value=str(settings.get("interval", 60)))
-        d_cap = tk.StringVar(value=str(settings.get("cap", 25)))
         d_rotate = tk.StringVar(value=str(settings.get("rotate_mb", 64)))
         d_close = tk.StringVar(value=close_labels.get(
             settings.get("close_behavior"), "隐藏到托盘"))
@@ -1405,33 +1427,21 @@ def run_gui():
         tk.Label(collect_card, text="COLLECTOR CORE  /  采集设置", bg=CARD, fg=CYAN,
                  font=("Consolas", 9, "bold")).grid(
             row=0, column=0, columnspan=4, sticky="w")
-        tk.Checkbutton(collect_card, text="自动识别关注列表中的开播房间",
-                       variable=d_follow, bg=CARD, fg=FG, selectcolor=CARD2,
-                       activebackground=CARD, activeforeground=FG,
-                       highlightthickness=0,
-                       font=("Microsoft YaHei UI", 10)).grid(
-            row=1, column=0, columnspan=4, sticky="w", pady=(6, 6))
         tk.Label(collect_card, text="刷新间隔（秒）", bg=CARD, fg=FG,
                  font=("Microsoft YaHei UI", 10)).grid(
-            row=2, column=0, sticky="w", pady=4)
+            row=1, column=0, sticky="w", pady=4)
         ttk.Spinbox(collect_card, from_=30, to=600, increment=10, width=10,
                     textvariable=d_interval).grid(
-            row=2, column=1, sticky="w", padx=(10, 0), pady=4)
-        tk.Label(collect_card, text="最多同时采集（个直播间）", bg=CARD, fg=FG,
-                 font=("Microsoft YaHei UI", 10)).grid(
-            row=3, column=0, sticky="w", pady=4)
-        ttk.Spinbox(collect_card, from_=1, to=100, increment=1, width=10,
-                    textvariable=d_cap).grid(
-            row=3, column=1, sticky="w", padx=(10, 0), pady=4)
+            row=1, column=1, sticky="w", padx=(10, 0), pady=4)
         tk.Label(collect_card, text="事件分片归档阈值（MB）", bg=CARD, fg=FG,
                  font=("Microsoft YaHei UI", 10)).grid(
-            row=4, column=0, sticky="w", pady=4)
+            row=2, column=0, sticky="w", pady=4)
         ttk.Spinbox(collect_card, from_=8, to=4096, increment=8, width=10,
                     textvariable=d_rotate).grid(
-            row=4, column=1, sticky="w", padx=(10, 0), pady=4)
+            row=2, column=1, sticky="w", padx=(10, 0), pady=4)
         tk.Label(collect_card, text="达到阈值后归档到新的 live_events.*.jsonl，旧分片永久保留。",
                  bg=CARD, fg=DIM, font=("Microsoft YaHei UI", 9)).grid(
-            row=5, column=0, columnspan=4, sticky="w", pady=(4, 0))
+            row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
         window_card = tk.Frame(body, bg=CARD, padx=18, pady=14,
                                highlightthickness=1, highlightbackground="#5a2a3d")
         window_card.pack(fill="x", pady=(12, 0))
@@ -1462,10 +1472,9 @@ def run_gui():
         def save_all_settings():
             try:
                 interval = max(30, min(600, int(d_interval.get())))
-                cap = max(1, min(100, int(d_cap.get())))
                 rotate_mb = max(8, min(4096, int(d_rotate.get())))
             except ValueError:
-                messagebox.showerror("输入有误", "刷新间隔、采集数量和归档阈值必须是数字。",
+                messagebox.showerror("输入有误", "刷新间隔和归档阈值必须是数字。",
                                      parent=dlg)
                 return
             new_dir = os.path.abspath(os.path.expandvars(
@@ -1506,10 +1515,13 @@ def run_gui():
                     messagebox.showerror("迁移数据失败", str(exc), parent=dlg)
                     return
 
+            current = load_settings()
             new_settings = {
-                "follow": bool(d_follow.get()),
+                "collection_mode": current.get("collection_mode", "auto"),
+                "manual_rooms": current.get("manual_rooms", []),
+                "follow": current.get("collection_mode", "auto") == "auto",
                 "interval": interval,
-                "cap": cap,
+                "cap": 0,
                 "rotate_mb": rotate_mb,
                 "keep": 0,
                 "close_behavior": close_options[d_close.get()],
@@ -1518,9 +1530,7 @@ def run_gui():
             }
             save_settings(new_settings)
             settings.update(new_settings)
-            follow_var.set(new_settings["follow"])
             interval_var.set(str(interval))
-            cap_var.set(str(cap))
             d_rotate.set(str(rotate_mb))
             close_label_var.set(d_close.get())
             minimize_label_var.set(d_minimize.get())
@@ -2087,9 +2097,9 @@ def run_gui():
         row=1, column=0, sticky="ew", padx=(0, 4), pady=4)
     neon_button(controls, "＋  手动补录", open_manual_dialog, accent=PURPLE).grid(
         row=1, column=1, sticky="ew", padx=4, pady=4)
+    # 同步功能保留，仅从客户端界面隐藏入口。
     sync_button = neon_button(
         controls, "⇄  同步danmakus数据", on_sync_history, accent=AMBER)
-    sync_button.grid(row=1, column=2, sticky="ew", padx=(4, 0), pady=4)
 
     log_card = cyber_card(outer, accent="#15334a", padx=14, pady=12)
     log_card.pack(fill="x", pady=(12, 0))

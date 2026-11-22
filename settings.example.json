@@ -1,7 +1,9 @@
 {
+  "collection_mode": "auto",
+  "manual_rooms": [],
   "follow": true,
   "interval": 60,
-  "cap": 25,
+  "cap": 0,
   "rotate_mb": 64,
   "keep": 0,
   "close_behavior": "tray",

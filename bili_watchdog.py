@@ -30,7 +30,7 @@ PYTHONW = (sys.executable if getattr(sys, "frozen", False)
 if not os.path.exists(PYTHONW):
     PYTHONW = sys.executable
 CREATE_NO_WINDOW = 0x08000000
-ARGS = ["collect", "--follow", "--interval", "60", "--cap", "25",
+ARGS = ["collect", "--follow", "--interval", "60", "--cap", "0",
         "--rotate-mb", "64", "--keep", "0"]
 WATCHDOG_MUTEX = "Local\\BiliLiveWatch.Watchdog.v1"
 _watchdog_mutex_handle = None

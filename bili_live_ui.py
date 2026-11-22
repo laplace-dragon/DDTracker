@@ -36,6 +36,8 @@ DISABLED_FILE = os.path.join(HERE, "collector.disabled")
 CONSOLE_LOG = os.path.join(HERE, "console.log")
 READY_FILE = os.path.join(HERE, "console.ready")
 TOKEN_FILE = os.path.join(HERE, "console.token")
+SETTINGS_FILE = os.path.join(HERE, "settings.json")
+COLLECTOR_ARGS_FILE = os.path.join(HERE, "collector.args.json")
 UI_MUTEX = "Local\\BiliLiveWatch.Console.v1"
 _ui_mutex_handle = None
 _api_token = ""
@@ -47,6 +49,7 @@ if not os.path.exists(PYTHONW):
 
 _cache = {"offset": 0, "events": []}
 _lock = threading.Lock()
+_settings_lock = threading.Lock()
 MAX_EVENTS = 50000
 CREATE_NO_WINDOW = 0x08000000
 _alive = {"pid": None, "at": 0.0, "ok": False}
@@ -224,22 +227,92 @@ def find_collector_pid():
     return pid
 
 
+def collection_settings():
+    defaults = {
+        "collection_mode": "auto",
+        "manual_rooms": [],
+        "follow": True,
+        "interval": 60,
+        "cap": 0,
+        "rotate_mb": 64,
+        "keep": 0,
+    }
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as fh:
+            saved = json.load(fh)
+        if isinstance(saved, dict):
+            defaults.update(saved)
+    except Exception:
+        pass
+    mode = defaults.get("collection_mode")
+    if mode not in ("auto", "manual"):
+        mode = "auto" if defaults.get("follow", True) else "manual"
+    defaults["collection_mode"] = mode
+    defaults["follow"] = mode == "auto"
+    defaults["cap"] = 0
+    defaults["keep"] = 0
+    try:
+        defaults["manual_rooms"] = sorted({
+            int(room) for room in (defaults.get("manual_rooms") or [])
+            if str(room).strip().isdigit()
+        })
+    except Exception:
+        defaults["manual_rooms"] = []
+    return defaults
+
+
+def collection_args(settings):
+    args = ["collect"]
+    if settings.get("collection_mode", "auto") == "auto":
+        args.append("--follow")
+    else:
+        args += ["--rooms", ",".join(
+            str(int(room)) for room in settings.get("manual_rooms") or [])]
+    args += [
+        "--interval", str(int(settings.get("interval", 60))),
+        "--cap", "0",
+        "--rotate-mb", str(int(settings.get("rotate_mb", 64))),
+        "--keep", "0",
+    ]
+    return args
+
+
+def write_collection_settings(changes):
+    with _settings_lock:
+        settings = collection_settings()
+        settings.update(changes or {})
+        mode = settings.get("collection_mode", "auto")
+        if mode not in ("auto", "manual"):
+            raise ValueError("collection_mode 必须是 auto 或 manual")
+        settings["collection_mode"] = mode
+        settings["follow"] = mode == "auto"
+        settings["cap"] = 0
+        settings["keep"] = 0
+        settings["manual_rooms"] = sorted({
+            int(room) for room in (settings.get("manual_rooms") or [])
+            if str(room).strip().isdigit()
+        })
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as fh:
+            json.dump(settings, fh, ensure_ascii=False, indent=2)
+        with open(COLLECTOR_ARGS_FILE, "w", encoding="utf-8") as fh:
+            json.dump(collection_args(settings), fh,
+                      ensure_ascii=False, indent=1)
+        return settings
+
+
 def collector_start(args=None):
+    settings = collection_settings()
+    if (settings.get("collection_mode") == "manual"
+            and not settings.get("manual_rooms")):
+        return "手动采集模式尚未选择直播间"
     try:
         os.remove(DISABLED_FILE)   # 解除「停止采集」标记，守护进程才会代管
     except OSError:
         pass
-    if read_pid():
+    current = read_pid()
+    if current and pid_alive(current):
         return "已在运行"
-    argv = ["collect", "--follow", "--interval", "60", "--cap", "25",
-            "--rotate-mb", "64", "--keep", "2"]
-    try:
-        with open(os.path.join(HERE, "collector.args.json"), "r", encoding="utf-8") as fh:
-            saved = json.load(fh)
-        if isinstance(saved, list) and saved and saved[0] == "collect":
-            argv = [str(x) for x in saved]
-    except Exception:
-        pass
+    argv = collection_args(settings)
     if getattr(sys, "frozen", False):
         cmd = [sys.executable] + argv
     else:
@@ -277,6 +350,29 @@ def collector_stop():
     except OSError:
         pass
     return "已停止"
+
+
+def restart_collection_if_running():
+    current = read_pid()
+    if not current or not pid_alive(current):
+        return ""
+    collector_stop()
+    time.sleep(0.6)
+    _alive.update(pid=None, at=0.0, ok=False)
+    try:
+        old = time.time() - 3600
+        os.utime(os.path.join(HERE, "collector.alive"), (old, old))
+    except OSError:
+        pass
+    return collector_start()
+
+
+def restart_or_start_collection():
+    """应用新的采集参数；未运行时也立即按当前模式启动。"""
+    current = read_pid()
+    if current and pid_alive(current):
+        return restart_collection_if_running()
+    return collector_start()
 
 
 def load_rooms():
@@ -429,10 +525,24 @@ def build_state():
             assets = {}
     recent = [event_item(e, names) for e in sorted(mine, key=lambda x: -(x.get("ts") or 0))[:200]]
     pid = read_pid()
+    collector_running = bool(pid and pid_alive(pid))
     w = assets.get("wealth_info") or {}
+    selection = collection_settings()
+    manual_rooms = set(selection.get("manual_rooms") or [])
+    room_rows = [
+        {"roomid": r["roomid"], "uname": r.get("uname") or "",
+         "selected": r["roomid"] in manual_rooms,
+         "live": r.get("live_status") == 1, "online": r.get("online") or 0}
+        for r in rooms
+    ]
+    room_rows.sort(key=lambda r: (
+        0 if r["live"] else 1,
+        -int(r.get("online") or 0),
+        str(r.get("uname") or ""),
+    ))
     return {
         "collector": {
-            "running": bool(pid),
+            "running": collector_running,
             "pid": pid,
             "log_tail": tail(os.path.join(HERE, "collector.log"), 6),
         },
@@ -443,14 +553,16 @@ def build_state():
         },
         "counts": dict(kinds, total=len(mine), all_events=len(uniq)),
         "spend": L.spend_summary(mine),
+        "collection": {
+            "mode": selection.get("collection_mode", "auto"),
+            "manual_rooms": sorted(manual_rooms),
+        },
         "src": src,
         "hourly": hourly,
         "daily": sorted(daily.items()),
         "by_room": sorted([(names.get(r) or str(r), c) for r, c in by_room.items()],
                           key=lambda x: -x[1])[:12],
-        "rooms": [{"roomid": r["roomid"], "uname": r.get("uname") or "",
-                   "watching": bool(r.get("watching")), "live": r.get("live_status") == 1,
-                   "online": r.get("online") or 0} for r in rooms],
+        "rooms": room_rows,
         "recent": recent,
         "updated": datetime.now(TZ).strftime("%H:%M:%S"),
     }
@@ -508,7 +620,7 @@ button:disabled{opacity:.45;cursor:default}
 .chip{background:#11161e;border:1px solid var(--line);border-radius:999px;padding:4px 13px;
 font-size:12px;color:var(--dim);cursor:pointer}
 .chip.on{background:linear-gradient(90deg,var(--blue),var(--pink));color:#fff;border-color:transparent}
-main{padding:20px 22px 60px;max-width:1240px}
+main{padding:20px 22px 60px;width:100%;max-width:none}
 h2{font-size:14px;color:var(--dim);text-transform:none;margin:26px 0 10px;font-weight:600;letter-spacing:.4px}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
@@ -583,13 +695,27 @@ box-shadow:0 8px 22px rgba(0,0,0,.4)}
   <div class="panel" id="src"></div>
   <h2>直播间管理</h2>
   <div class="panel">
+    <div class="toolbar" id="collectionMode" style="margin-bottom:10px">
+      <span class="muted">采集模式</span>
+      <button class="chip on" data-mode="auto">自动采集全部开播</button>
+      <button class="chip" data-mode="manual">手动选择本次采集</button>
+      <span class="muted" id="collectionModeHint"></span>
+    </div>
     <div class="toolbar" style="margin-bottom:12px">
       <input type="text" id="roomInput" placeholder="直播间号">
       <button id="btnAdd">添加</button>
       <button id="btnDiscover">从关注列表重新发现</button>
+      <input type="search" id="roomSearch" placeholder="搜索主播名或房间号">
       <span class="muted" id="roomCount"></span>
     </div>
     <div class="wrap"><table id="rooms"></table></div>
+    <div class="pager">
+      <button id="roomPrev">上一页</button>
+      <span class="muted" id="roomPageInfo">第 1 / 1 页</span>
+      <input id="roomJump" type="number" min="1" value="1" aria-label="直播间跳转页码">
+      <button id="roomGo">跳转</button>
+      <button id="roomNext">下一页</button>
+    </div>
   </div>
   <h2>运行日志</h2>
   <div class="panel"><pre id="log"></pre></div>
@@ -599,6 +725,8 @@ const $=s=>document.querySelector(s);
 const API_TOKEN=new URLSearchParams(location.search).get('token')||'';
 let recentKind='all', lastCount=-1, recentPage=1, recentPages=1;
 const RECENT_PAGE_SIZE=100;
+let latestRooms=[], roomSearchText='', roomPage=1, roomPages=1, roomMode='auto';
+const ROOM_PAGE_SIZE=100;
 async function loadRecent(){
   const offset=(recentPage-1)*RECENT_PAGE_SIZE;
   const d=await api('/api/events?kind='+encodeURIComponent(recentKind)+
@@ -644,6 +772,27 @@ function bars(el,arr){const m=Math.max(1,...arr);el.innerHTML=arr.map((n,i)=>
   `<div style="height:${Math.round(n/m*100)}%" title="${i}时 · ${n} 条"></div>`).join('');}
 function bars2(el,arr){const t=arr.reduce((a,b)=>a+b[1],0)||1;el.innerHTML=arr.map(([k,n])=>
   `<div class="row"><div class="label">${k}</div><div class="track"><div class="fill" style="width:${n/t*100}%"></div></div><div class="num">${n}</div></div>`).join('')||'<div class="muted">暂无数据</div>';}
+function renderRooms(){
+  const q=roomSearchText.trim().toLowerCase();
+  const list=latestRooms.filter(x=>!q||String(x.uname||'').toLowerCase().includes(q)||String(x.roomid).includes(q));
+  roomPages=Math.max(1,Math.ceil(list.length/ROOM_PAGE_SIZE));
+  roomPage=Math.max(1,Math.min(roomPage,roomPages));
+  const pageRows=list.slice((roomPage-1)*ROOM_PAGE_SIZE,roomPage*ROOM_PAGE_SIZE);
+  const rm=$('#rooms');rm.innerHTML='<thead><tr><th>状态</th><th>主播</th><th>直播间号</th><th>人气</th><th>采集</th></tr></thead><tbody>'+
+    (pageRows.map(x=>`<tr><td>${x.live?'<span class="pill live">直播中</span>':'<span class="pill">未开播</span>'}</td>`+
+     `<td>${esc(x.uname)}</td><td>${x.roomid}</td><td>${x.online}</td>`+
+     `<td><button class="chip ${roomMode==='manual'&&x.selected?'on':''}" ${roomMode==='auto'?'disabled':''} `+
+     `onclick="selectRoom(${x.roomid})">${roomMode==='auto'?'自动':x.selected?'已选择':'选择'}</button></td></tr>`).join('')||
+     '<tr><td colspan="5" class="muted">没有匹配的直播间</td></tr>')+'</tbody>';
+  $('#roomCount').textContent=`共 ${latestRooms.length} 个，开播 ${latestRooms.filter(x=>x.live).length} 个，匹配 ${list.length} 个`;
+  $('#roomPageInfo').textContent=`第 ${roomPage} / ${roomPages} 页`;
+  $('#roomPrev').disabled=roomPage<=1; $('#roomNext').disabled=roomPage>=roomPages;
+  $('#roomJump').value=roomPage; $('#roomJump').max=roomPages;
+  document.querySelectorAll('#collectionMode .chip').forEach(b=>b.classList.toggle('on',b.dataset.mode===roomMode));
+  $('#collectionModeHint').textContent=roomMode==='auto'?
+    '自动连接全部开播房间' : `已选择 ${latestRooms.filter(x=>x.selected).length} 个房间`;
+}
+function goRoomPage(page){roomPage=Math.max(1,Math.min(roomPages,Number(page)||1));renderRooms();}
 async function refresh(){
   const s=await api('/api/state');
   $('#status').innerHTML=`<span class="dot ${s.collector.running?'on':'off'}"></span>`+
@@ -653,7 +802,8 @@ async function refresh(){
     ['B币',s.assets.coin],
     ['直播等级','LV'+s.assets.level],['财富等级','LV'+s.assets.wealth],
     ['财富累计分',s.assets.wealth_total],['亲密度',s.assets.intimacy],
-    ['跟踪房间',s.rooms.filter(r=>r.watching).length],['已采集事件',s.counts.all_events]]);
+    ['采集模式',s.collection?.mode==='manual'?'手动选择':'自动全部'],
+    ['已选择房间',(s.collection?.manual_rooms||[]).length],['已采集事件',s.counts.all_events]]);
   const y=n=>'¥'+Number(n||0).toFixed(2);
   cards($('#spendcards'),[
     ['总支出',y(s.spend.total)],['礼物支出',y(s.spend.gift)],['上舰支出',y(s.spend.guard)],
@@ -667,11 +817,9 @@ async function refresh(){
     `两路重叠 <b>${s.src.both}</b> ｜ 仅回补有（实时流可能漏记） <b style="color:var(--warn)">${s.src.backfill_only}</b> ｜ `+
     `仅实时流有 <b>${s.src.live_only}</b>`;
   if (s.counts.all_events !== lastCount) { lastCount = s.counts.all_events; loadRecent(); }
-  const rm=$('#rooms');rm.innerHTML='<thead><tr><th>状态</th><th>主播</th><th>直播间号</th><th>在线</th><th>跟踪</th><th></th></tr></thead><tbody>'+
-    s.rooms.slice(0,80).map(x=>`<tr><td>${x.live?'<span class="pill live">直播中</span>':'<span class="pill">未开播</span>'}</td>`+
-     `<td>${esc(x.uname)}</td><td>${x.roomid}</td><td>${x.online}</td><td>${x.watching?'是':'否'}</td>`+
-     `<td><button onclick="toggle(${x.roomid})">${x.watching?'停跟':'跟踪'}</button></td></tr>`).join('')+'</tbody>';
-  $('#roomCount').textContent=`共 ${s.rooms.length} 个，跟踪中 ${s.rooms.filter(x=>x.watching).length} 个`;
+  roomMode=s.collection?.mode||'auto';
+  latestRooms=s.rooms;
+  renderRooms();
   $('#log').textContent=s.collector.log_tail.join('\n');
 }
 function esc(t){return String(t??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
@@ -688,9 +836,17 @@ async function post(p,b){
     return r;
   }catch(e){ toast('请求失败：'+e.message,false); }
 }
-window.toggle=id=>post('/api/rooms/toggle',{roomid:id});
+window.selectRoom=id=>post('/api/rooms/select',{roomid:id});
 $('#btnAdd').onclick=()=>{const v=$('#roomInput').value.trim();if(v)post('/api/rooms/add',{roomid:v});};
 $('#btnDiscover').onclick=()=>post('/api/discover');
+document.querySelectorAll('#collectionMode .chip').forEach(b=>{
+  b.onclick=()=>post('/api/rooms/mode',{mode:b.dataset.mode});
+});
+$('#roomSearch').addEventListener('input',e=>{roomSearchText=e.target.value;roomPage=1;renderRooms();});
+$('#roomPrev').onclick=()=>goRoomPage(roomPage-1);
+$('#roomNext').onclick=()=>goRoomPage(roomPage+1);
+$('#roomGo').onclick=()=>goRoomPage($('#roomJump').value);
+$('#roomJump').addEventListener('keydown',e=>{if(e.key==='Enter')goRoomPage($('#roomJump').value);});
 refresh();setInterval(refresh,3000);
 </script></body></html>"""
 
@@ -769,18 +925,49 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/report":
                 L.cmd_report()
                 result["msg"] = "报告已生成"
-            elif path == "/api/rooms/toggle":
-                rooms = load_rooms()
-                for r in rooms:
-                    if r["roomid"] == payload.get("roomid"):
-                        r["watching"] = not r.get("watching")
-                save_rooms(rooms)
-                result["msg"] = "已更新"
+            elif path == "/api/rooms/mode":
+                mode = str(payload.get("mode") or "")
+                settings = write_collection_settings({"collection_mode": mode})
+                if (mode == "manual"
+                        and not settings.get("manual_rooms")):
+                    current = read_pid()
+                    if current and pid_alive(current):
+                        collector_stop()
+                    result["msg"] = "已切换手动模式，请选择本次采集直播间"
+                else:
+                    start_msg = restart_or_start_collection()
+                    result["msg"] = ("已切换自动采集全部开播房间；%s"
+                                     if mode == "auto" else "已切换手动采集；%s") % start_msg
+            elif path == "/api/rooms/select":
+                settings = collection_settings()
+                if settings.get("collection_mode") != "manual":
+                    raise ValueError("自动采集模式下不能选择单个直播间")
+                roomid = int(payload.get("roomid"))
+                roomids = set(settings.get("manual_rooms") or [])
+                if roomid in roomids:
+                    roomids.remove(roomid)
+                else:
+                    if not any(r.get("roomid") == roomid for r in load_rooms()):
+                        raise ValueError("直播间不存在")
+                    roomids.add(roomid)
+                settings = write_collection_settings(
+                    {"manual_rooms": sorted(roomids)})
+                if settings.get("manual_rooms"):
+                    start_msg = restart_or_start_collection()
+                    result["msg"] = "已更新手动采集房间；%s" % start_msg
+                else:
+                    current = read_pid()
+                    if current and pid_alive(current):
+                        collector_stop()
+                    result["msg"] = "尚未选择采集房间，采集器已暂停"
             elif path == "/api/rooms/add":
                 result["msg"] = "已添加"
                 L.cmd_add(int(payload.get("roomid")))
             elif path == "/api/discover":
-                threading.Thread(target=L.cmd_discover, daemon=True).start()
+                def discover_and_reload():
+                    L.cmd_discover()
+                    restart_collection_if_running()
+                threading.Thread(target=discover_and_reload, daemon=True).start()
                 result["msg"] = "正在后台发现，稍后刷新"
             else:
                 return self._send(404, json.dumps({"error": "not found"}))

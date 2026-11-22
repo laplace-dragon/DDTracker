@@ -293,24 +293,55 @@ def cmd_snapshot():
 def resolve_rooms(uids, ck):
     """批量查询 uid 对应的直播间与开播状态。"""
     out = {}
-    for i in range(0, len(uids), 50):
-        chunk = uids[i:i + 50]
+    pending = [uids[i:i + 50] for i in range(0, len(uids), 50)]
+    while pending:
+        chunk = pending.pop(0)
         q = "&".join("uids[]=%d" % u for u in chunk)
         try:
             j = get("https://api.live.bilibili.com/room/v1/Room/get_status_info_by_uids?%s" % q, ck)
         except Exception as exc:
-            print("  [批量查询失败] %s" % exc)
+            if len(chunk) > 1:
+                middle = len(chunk) // 2
+                pending[0:0] = [chunk[:middle], chunk[middle:]]
+                print("  [批量查询失败，拆分 %d 个 UID 重试] %s"
+                      % (len(chunk), exc))
+                time.sleep(0.3)
+            else:
+                print("  [房间状态查询失败] UID %s：%s" % (chunk[0], exc))
+            continue
+        if j.get("code") not in (None, 0):
+            if len(chunk) > 1:
+                middle = len(chunk) // 2
+                pending[0:0] = [chunk[:middle], chunk[middle:]]
+                print("  [批量查询返回 %s，拆分 %d 个 UID 重试]"
+                      % (j.get("code"), len(chunk)))
+                time.sleep(0.3)
+            else:
+                print("  [房间状态查询返回 %s] UID %s"
+                      % (j.get("code"), chunk[0]))
             continue
         data = j.get("data") or {}
         for uid_s, v in data.items():
             if isinstance(v, dict) and v.get("room_id"):
                 out[int(uid_s)] = v
+        if len(pending) and len(chunk) == 50:
+            time.sleep(0.15)
     return out
 
 
 def cmd_discover():
     ck = cookie()
     mid = my_mid()
+    existing_rooms = []
+    try:
+        with open(ROOMS_FILE, "r", encoding="utf-8") as fh:
+            existing_rooms = json.load(fh).get("rooms", [])
+    except Exception:
+        pass
+    existing_by_room = {
+        int(room["roomid"]): room for room in existing_rooms
+        if room.get("roomid")
+    }
     uids = []
     for pn in range(1, 12):
         j = get("https://api.bilibili.com/x/relation/followings?vmid=%d&pn=%d&ps=50&order=desc" % (mid, pn),
@@ -327,11 +358,32 @@ def cmd_discover():
     print("其中开通直播间的：%d" % len(status))
     live = [v for v in status.values() if v.get("live_status") == 1]
     print("当前正在直播：%d" % len(live))
-    rooms = []
+    rooms_by_id = {}
     for v in sorted(status.values(), key=lambda x: -(x.get("online") or 0)):
-        rooms.append({"roomid": v["room_id"], "uid": v.get("uid"), "uname": v.get("uname"),
-                      "live_status": v.get("live_status"), "title": v.get("title"),
-                      "online": v.get("online"), "watching": v.get("live_status") == 1})
+        room_id = int(v["room_id"])
+        rooms_by_id[room_id] = {
+            "roomid": room_id,
+            "uid": v.get("uid"),
+            "uname": v.get("uname"),
+            "live_status": v.get("live_status"),
+            "title": v.get("title"),
+            "online": v.get("online"),
+        }
+    for room_id, previous in existing_by_room.items():
+        if room_id not in rooms_by_id:
+            retained = dict(previous)
+            retained.pop("watching", None)
+            # 本次状态查询没有返回时，旧的开播状态已经失效。
+            retained["live_status"] = 0
+            retained["online"] = 0
+            rooms_by_id[room_id] = retained
+    rooms = sorted(
+        rooms_by_id.values(),
+        key=lambda x: (
+            0 if x.get("live_status") == 1 else 1,
+            -(x.get("online") or 0),
+            str(x.get("uname") or ""),
+        ))
     with open(ROOMS_FILE, "w", encoding="utf-8") as fh:
         json.dump({"rooms": rooms}, fh, ensure_ascii=False, indent=2)
     for r in rooms[:12]:
@@ -358,7 +410,7 @@ def cmd_add(rid):
         return 0
     rooms.append({"roomid": rid, "uid": room.get("uid"), "uname": name,
                   "live_status": room.get("live_status"), "title": room.get("title"),
-                  "online": room.get("online"), "watching": True})
+                  "online": room.get("online")})
     with open(ROOMS_FILE, "w", encoding="utf-8") as fh:
         json.dump({"rooms": rooms}, fh, ensure_ascii=False, indent=2)
     print("已加入 %s（%s），共 %d 个房间" % (rid, name, len(rooms)))
@@ -1330,7 +1382,9 @@ async def watch_dynamic(rooms, ck, mid, out, stop, interval, cap):
         except Exception as exc:
             print("刷新开播状态失败：%s" % exc)
         live = sorted([v for v in status.values() if v.get("live_status") == 1],
-                      key=lambda x: -(x.get("online") or 0))[:cap]
+                      key=lambda x: -(x.get("online") or 0))
+        if cap > 0:
+            live = live[:cap]
         want = {v["room_id"]: v for v in live}
         for rid in list(tasks):
             if rid not in want:
@@ -1352,11 +1406,9 @@ async def run_collect(rooms, ck, mid):
     stop = {"done": False}
     out = Sink(EVENTS_FILE, _limit["rotate_mb"], _limit["keep"])
     try:
-        if _limit["follow"]:
-            tasks = [asyncio.create_task(
-                watch_dynamic(rooms, ck, mid, out, stop, _limit["interval"], _limit["cap"]))]
-        else:
-            tasks = [asyncio.create_task(watch(r["roomid"], ck, mid, out, stop)) for r in rooms]
+        tasks = [asyncio.create_task(
+            watch_dynamic(rooms, ck, mid, out, stop,
+                          _limit["interval"], _limit["cap"]))]
         tasks.append(asyncio.create_task(heartbeat(stop)))
         try:
             seconds = _limit["seconds"]
@@ -1408,7 +1460,8 @@ async def heartbeat(stop):
         await asyncio.sleep(30)
 
 
-_limit = {"seconds": 0, "follow": False, "interval": 60, "cap": 25, "all": False,
+_limit = {"seconds": 0, "follow": False, "rooms": [], "interval": 60, "cap": 0,
+          "all": False,
           "rotate_mb": 256, "keep": 0}
 
 
@@ -1421,6 +1474,10 @@ def cmd_collect():
         _limit["seconds"] = int(argv[argv.index("--seconds") + 1])
     if "--follow" in argv:
         _limit["follow"] = True
+    if "--rooms" in argv:
+        value = argv[argv.index("--rooms") + 1]
+        _limit["rooms"] = [
+            int(part) for part in value.split(",") if part.strip().isdigit()]
     if "--interval" in argv:
         _limit["interval"] = int(argv[argv.index("--interval") + 1])
     if "--cap" in argv:
@@ -1438,18 +1495,22 @@ def cmd_collect():
         return 2
     with open(ROOMS_FILE, "r", encoding="utf-8") as fh:
         all_rooms = json.load(fh).get("rooms", [])
-    if _limit["follow"]:
+    if _limit["rooms"]:
+        selected = set(_limit["rooms"])
+        rooms = [r for r in all_rooms if int(r.get("roomid") or 0) in selected]
+    elif _limit["follow"]:
         rooms = [r for r in all_rooms if r.get("uid")]
     else:
-        rooms = [r for r in all_rooms if r.get("watching")]
-    if not rooms:
-        print("rooms.json 里没有启用中的房间。")
+        print("没有指定采集模式：请使用 --follow 或 --rooms。")
         return 2
-    if _limit["follow"]:
-        print("开始跟踪关注列表中的 %d 个直播间（自动识别开播），Ctrl+C 停止。" % len(rooms))
-    else:
-        print("开始采集 %d 个直播间，Ctrl+C 停止：%s"
+    if not rooms:
+        print("没有找到可采集的直播间。")
+        return 2
+    if _limit["rooms"]:
+        print("手动采集 %d 个直播间（识别开播后连接）：%s"
               % (len(rooms), ", ".join(str(r["roomid"]) for r in rooms)))
+    else:
+        print("开始跟踪关注列表中的 %d 个直播间（自动识别开播），Ctrl+C 停止。" % len(rooms))
     try:
         asyncio.run(run_collect(rooms, ck, mid))
     except KeyboardInterrupt:
